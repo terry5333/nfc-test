@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { db } from '../lib/firebase';
-import { ref, onValue, set, remove, push } from 'firebase/database';
+import { ref, onValue, set, remove, push, update } from 'firebase/database';
 
 export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('students');
   const [lastScan, setLastScan] = useState("");
+  const [scanMode, setScanMode] = useState("上學"); // 門禁總開關狀態
 
   const [students, setStudents] = useState([]);
+  const [authCards, setAuthCards] = useState({}); // 存放所有卡片的詳細狀態 (包含鎖卡資訊)
   const [teachers, setTeachers] = useState([]);
   const [logs, setLogs] = useState([]);
 
@@ -15,7 +17,10 @@ export default function AdminDashboard() {
   const [bindingTarget, setBindingTarget] = useState(null);
 
   useEffect(() => {
-    // 監聽地端 Python (USB 讀卡機)
+    // 1. 監聽門禁總開關
+    const unsubMode = onValue(ref(db, 'system/settings/scanMode'), (s) => setScanMode(s.val() || "上學"));
+
+    // 2. 監聽地端 Python (USB 讀卡機)
     const checkLocal = setInterval(async () => {
       try {
         const res = await fetch('http://localhost:5000/scan');
@@ -24,29 +29,37 @@ export default function AdminDashboard() {
       } catch (e) {}
     }, 1000);
 
-    // 監聽雲端與資料庫
+    // 3. 監聽雲端與資料庫
     const unsubScan = onValue(ref(db, 'system/last_scan'), (s) => {
       const data = s.val();
       if (data && data.id) setLastScan(data.id.replace(/[\s:]/g, '').toUpperCase());
     });
+    
     const unsubStudents = onValue(ref(db, 'school_roster'), (s) => {
       const data = s.val();
       setStudents(data ? Object.keys(data).map(k => ({ dbId: k, ...data[k] })) : []);
     });
-    const unsubTeachers = onValue(ref(db, 'authorized_cards'), (s) => {
-      const data = s.val();
-      if (data) setTeachers(Object.keys(data).map(k => ({ cardId: k, ...data[k] })).filter(item => item.role === 'teacher'));
-      else setTeachers([]);
+    
+    const unsubCards = onValue(ref(db, 'authorized_cards'), (s) => {
+      const data = s.val() || {};
+      setAuthCards(data); // 儲存所有卡片資訊以便查閱鎖定狀態
+      setTeachers(Object.keys(data).map(k => ({ cardId: k, ...data[k] })).filter(item => item.role === 'teacher'));
     });
+    
     const unsubLogs = onValue(ref(db, 'student_logs'), (s) => {
       const data = s.val();
       setLogs(data ? Object.values(data).reverse() : []);
     });
 
-    return () => { clearInterval(checkLocal); unsubScan(); unsubStudents(); unsubTeachers(); unsubLogs(); };
+    return () => { clearInterval(checkLocal); unsubMode(); unsubScan(); unsubStudents(); unsubCards(); unsubLogs(); };
   }, []);
 
-  // --- 處理邏輯 ---
+  // --- 操作邏輯 ---
+  const toggleScanMode = async () => {
+    const newMode = scanMode === '上學' ? '放學' : '上學';
+    await set(ref(db, 'system/settings/scanMode'), newMode);
+  };
+
   const handleAddStudent = async () => {
     if (!newStudent.name || !newStudent.classInfo) return alert("請填寫班級與姓名");
     await push(ref(db, 'school_roster'), { ...newStudent, cardId: null });
@@ -58,9 +71,17 @@ export default function AdminDashboard() {
   const confirmBinding = async () => {
     if (!lastScan || !bindingTarget) return;
     await set(ref(db, `school_roster/${bindingTarget.dbId}/cardId`), lastScan);
-    await set(ref(db, `authorized_cards/${lastScan}`), { name: `${bindingTarget.classInfo}-${bindingTarget.seat} ${bindingTarget.name}`, role: 'student', refId: bindingTarget.dbId });
+    await set(ref(db, `authorized_cards/${lastScan}`), { 
+      name: `${bindingTarget.classInfo}-${bindingTarget.seat} ${bindingTarget.name}`, 
+      role: 'student', refId: bindingTarget.dbId, spamCount: 0, isLocked: false 
+    });
     setBindingTarget(null); setLastScan("");
     alert("✅ 學生綁卡成功！");
+  };
+
+  const handleUnlock = async (cardId) => {
+    await update(ref(db, `authorized_cards/${cardId}`), { isLocked: false, spamCount: 0 });
+    alert("🔓 已解除封印！");
   };
 
   const handleAddTeacher = async () => {
@@ -70,26 +91,17 @@ export default function AdminDashboard() {
     alert("✅ 老師註冊成功！");
   };
 
-  // --- 匯出禾豐格式 CSV ---
   const exportToHeFeng = () => {
     if (logs.length === 0) return alert("目前沒有打卡紀錄可匯出！");
-    let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; 
-    csvContent += "打卡日期,打卡時間,學生姓名,感應卡號,打卡狀態\n";
+    let csvContent = "data:text/csv;charset=utf-8,\uFEFF打卡日期,打卡時間,學生姓名,感應卡號,打卡狀態\n";
     logs.forEach(log => {
       const d = new Date(log.time);
-      const dateStr = d.toLocaleDateString('zh-TW');
-      const timeStr = d.toLocaleTimeString('zh-TW', { hour12: false });
-      const name = log.name || "未命名";
-      const cardId = log.id || "";
-      csvContent += `${dateStr},${timeStr},${name},${cardId},正常\n`;
+      csvContent += `${d.toLocaleDateString('zh-TW')},${d.toLocaleTimeString('zh-TW', { hour12: false })},${log.name || "未命名"},${log.id || ""},${log.period || "正常"}\n`;
     });
-    const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `禾豐打卡匯出_${new Date().toLocaleDateString('zh-TW').replace(/\//g, '')}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    link.href = encodeURI(csvContent);
+    link.download = `禾豐打卡匯出_${new Date().toLocaleDateString('zh-TW').replace(/\//g, '')}.csv`;
+    document.body.appendChild(link); link.click(); document.body.removeChild(link);
   };
 
   // --- 昭和風介面渲染 ---
@@ -99,6 +111,18 @@ export default function AdminDashboard() {
       
       <header style={header}>
         <h1 style={title}>TerryEdu 案內所</h1>
+        
+        {/* 門禁總開關 */}
+        <div style={modeSwitchContainer}>
+          <span style={{ fontWeight: 'bold', marginRight: '15px', fontSize: '1.2rem' }}>⛩️ 現在門禁狀態：</span>
+          <button onClick={toggleScanMode} style={scanMode === '上學' ? modeBtnMorning : modeBtnEvening}>
+            {scanMode === '上學' ? '🌅 登校 (上學) 收集中' : '🌇 下校 (放學) 收集中'}
+          </button>
+          <p style={{ fontSize: '0.85rem', color: '#8c3b3a', marginTop: '10px', margin: '10px 0 0 0' }}>
+            ※ 點擊木牌切換。全校打卡機將同步切換為此狀態，並套用防呆機制。
+          </p>
+        </div>
+
         <div style={tabs}>
           <button onClick={() => setActiveTab('students')} style={activeTab === 'students' ? activeBtn : btn}>壹。生徒登錄</button>
           <button onClick={() => setActiveTab('attendance')} style={activeTab === 'attendance' ? activeBtn : btn}>貳。出勤紀錄</button>
@@ -131,16 +155,25 @@ export default function AdminDashboard() {
             <table style={table}>
               <thead><tr><th>班級</th><th>座號</th><th>氏名</th><th>識別卷狀態</th><th>處置</th></tr></thead>
               <tbody>
-                {students.map(s => (
-                  <tr key={s.dbId}>
-                    <td>{s.classInfo}</td><td>{s.seat}</td><td>{s.name}</td>
-                    <td>{s.cardId ? <span style={{color:'#2d6a4f', fontWeight:'bold'}}>已綁定</span> : <span style={{color:'#9b2226'}}>未發放</span>}</td>
-                    <td>
-                      {!s.cardId && <button onClick={() => startBinding(s)} style={actionBtn}>+ 綁定</button>}
-                      {s.cardId && <button onClick={() => remove(ref(db, `authorized_cards/${s.cardId}`)).then(()=>set(ref(db, `school_roster/${s.dbId}/cardId`), null))} style={cancelBtn}>解除</button>}
-                    </td>
-                  </tr>
-                ))}
+                {students.map(s => {
+                  const cardData = s.cardId ? authCards[s.cardId] : null;
+                  const isLocked = cardData?.isLocked;
+                  return (
+                    <tr key={s.dbId} style={isLocked ? {background: '#f8d7da'} : {}}>
+                      <td>{s.classInfo}</td><td>{s.seat}</td><td><b style={{color: isLocked ? '#9b2226' : 'inherit'}}>{s.name}</b></td>
+                      <td>
+                        {s.cardId 
+                          ? (isLocked ? <span style={{color:'#9b2226', fontWeight:'bold'}}>🔒 謹慎中 (鎖定)</span> : <span style={{color:'#2d6a4f', fontWeight:'bold'}}>✅ 正常運作</span>) 
+                          : <span style={{color:'#888'}}>未發放</span>}
+                      </td>
+                      <td>
+                        {!s.cardId && <button onClick={() => startBinding(s)} style={actionBtn}>+ 綁定</button>}
+                        {isLocked && <button onClick={() => handleUnlock(s.cardId)} style={unlockBtn}>🔓 恩赦</button>}
+                        {s.cardId && !isLocked && <button onClick={() => remove(ref(db, `authorized_cards/${s.cardId}`)).then(()=>set(ref(db, `school_roster/${s.dbId}/cardId`), null))} style={cancelBtn}>收回</button>}
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -150,15 +183,14 @@ export default function AdminDashboard() {
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <h2 style={sectionTitle}>🕰️ 本日出勤帳</h2>
-              <button onClick={exportToHeFeng} style={exportBtn}>
-                📥 匯出禾豐 CSV
-              </button>
+              <button onClick={exportToHeFeng} style={exportBtn}>📥 匯出禾豐 CSV</button>
             </div>
             <table style={table}>
-              <thead><tr><th>刻 (時間)</th><th>氏名 (姓名)</th><th>識別番號 (卡號)</th></tr></thead>
+              <thead><tr><th>時段</th><th>刻 (時間)</th><th>氏名 (姓名)</th><th>識別番號</th></tr></thead>
               <tbody>
                 {logs.slice(0, 100).map((log, i) => (
                   <tr key={i}>
+                    <td style={{color: log.period === '上學' ? '#2d6a4f' : '#8c3b3a', fontWeight: 'bold'}}>{log.period || '紀錄'}</td>
                     <td>{new Date(log.time).toLocaleString('zh-TW')}</td>
                     <td style={{fontWeight:'bold', color:'#3e2723'}}>{log.name}</td>
                     <td><code style={codeBlock}>{log.id}</code></td>
@@ -196,34 +228,35 @@ export default function AdminDashboard() {
   );
 }
 
-// --- 昭和風 (Showa Retro) 樣式定義 ---
+// --- 昭和風樣式 ---
 const layout = { padding: '40px 20px', minHeight: '100vh', background: '#f4ecd8', fontFamily: '"Noto Serif TC", serif', color: '#3e2723' };
-const header = { maxWidth: '900px', margin: '0 auto 30px auto', textAlign: 'center', borderBottom: '3px double #3e2723', paddingBottom: '20px' };
-const title = { fontSize: '2.5rem', letterSpacing: '5px', margin: '0 0 20px 0', color: '#5a3d31' };
+const header = { maxWidth: '1000px', margin: '0 auto 30px auto', textAlign: 'center', borderBottom: '3px double #3e2723', paddingBottom: '20px' };
+const title = { fontSize: '2.5rem', letterSpacing: '5px', margin: '0 0 20px 0', color: '#5a3d31', fontWeight: 'bold' };
+
+const modeSwitchContainer = { background: '#dcd3c6', padding: '15px', border: '2px solid #3e2723', display: 'inline-block', marginBottom: '25px', boxShadow: '3px 3px 0px #3e2723' };
+const modeBtnMorning = { padding: '10px 20px', background: '#d9b650', color: '#3e2723', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', fontSize: '1.2rem', fontWeight: 'bold', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', transition: '0.1s' };
+const modeBtnEvening = { ...modeBtnMorning, background: '#5c7a5f', color: '#f4ecd8' };
+
 const tabs = { display: 'flex', justifyContent: 'center', gap: '15px' };
-const btn = { padding: '8px 20px', border: '2px solid #3e2723', background: '#eaddc5', color: '#3e2723', fontFamily: '"Noto Serif TC", serif', fontSize: '1.1rem', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', transition: '0.1s' };
-const activeBtn = { ...btn, background: '#3e2723', color: '#f4ecd8', transform: 'translate(2px, 2px)', boxShadow: 'none' };
-const mainContent = { maxWidth: '900px', margin: '0 auto', background: '#fffcf5', padding: '30px', border: '2px solid #3e2723', boxShadow: '5px 5px 0px #3e2723' };
+const btn = { padding: '8px 20px', border: '2px solid #3e2723', background: '#eaddc5', color: '#3e2723', fontFamily: '"Noto Serif TC", serif', fontSize: '1.1rem', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723' };
+const activeBtn = { ...btn, background: '#3e2723', color: '#f4ecd8', boxShadow: 'none', transform: 'translate(2px, 2px)' };
+const mainContent = { maxWidth: '1000px', margin: '0 auto', background: '#fffcf5', padding: '30px', border: '2px solid #3e2723', boxShadow: '5px 5px 0px #3e2723' };
 const sectionTitle = { borderLeft: '8px solid #8c3b3a', paddingLeft: '15px', color: '#3e2723', marginTop: '0' };
 const formCard = { display: 'flex', gap: '10px', padding: '20px', background: '#eaddc5', border: '1px solid #3e2723', marginBottom: '25px', alignItems: 'center' };
 const input = { padding: '8px 12px', border: '1px solid #3e2723', background: '#f4ecd8', fontFamily: '"Noto Serif TC", serif', flex: 1, fontSize: '1rem', outline: 'none' };
+
 const actionBtn = { padding: '8px 20px', background: '#5c7a5f', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', fontWeight: 'bold', boxShadow: '2px 2px 0px #3e2723' };
 const cancelBtn = { padding: '8px 15px', background: '#8c3b3a', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723' };
 const confirmBtn = { padding: '8px 15px', background: '#d9b650', color: '#3e2723', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', fontWeight: 'bold' };
+const unlockBtn = { padding: '8px 15px', background: '#d97750', color: '#fffcf5', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', fontWeight: 'bold', marginRight: '5px' };
 const exportBtn = { padding: '8px 20px', background: '#3b82f6', color: '#fff', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', fontWeight: 'bold', boxShadow: '2px 2px 0px #3e2723' };
 const alertBox = { padding: '20px', background: '#f5e6d3', border: '2px dashed #8c3b3a', marginBottom: '25px', color: '#3e2723' };
 const codeBlock = { background: '#dcd3c6', padding: '2px 8px', border: '1px solid #a89f91', fontFamily: 'monospace' };
 
-// 🚩 補齊剛剛漏掉的 table 變數
 const table = { width: '100%', borderCollapse: 'collapse', textAlign: 'left', marginTop: '10px', border: '2px solid #3e2723' };
 
-// 表格細部復古樣式 (維持不變)
 if (typeof document !== 'undefined') {
   const style = document.createElement('style');
-  style.innerHTML = `
-    th, td { border: 1px solid #3e2723; padding: 12px 15px; }
-    th { background: #dcd3c6; color: #3e2723; font-weight: bold; letter-spacing: 2px; }
-    tr:nth-child(even) { background: #fbf8f1; }
-  `;
+  style.innerHTML = `th, td { border: 1px solid #3e2723; padding: 12px 15px; } th { background: #dcd3c6; color: #3e2723; font-weight: bold; letter-spacing: 2px; } tr:nth-child(even) { background: #fbf8f1; }`;
   document.head.appendChild(style);
 }
