@@ -1,10 +1,54 @@
-async function handleAuth(cardId, source) {
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/router';
+import { db } from '../lib/firebase';
+import { ref, onValue, get, set, update, push, serverTimestamp } from 'firebase/database';
+
+export default function Home() {
+  const router = useRouter();
+  const [status, setStatus] = useState("⌛ 待命：請感應或嗶卡");
+  const [isSuccess, setIsSuccess] = useState(false);
+  const [scanMode, setScanMode] = useState("上學"); 
+  const [processing, setProcessing] = useState(false);
+
+  // 🚩 設定你的神卡卡號
+  const MY_GOD_CARD = process.env.NEXT_PUBLIC_MY_GOD_CARD || "你的神卡卡號";
+
+  useEffect(() => {
+    // 監聽門禁開關
+    const unsubMode = onValue(ref(db, 'system/settings/scanMode'), (s) => setScanMode(s.val() || "上學"));
+
+    // 監聽實體讀卡機
+    const checkLocal = setInterval(async () => {
+      try {
+        const res = await fetch('http://localhost:5000/scan');
+        const data = await res.json();
+        
+        if (data.status === "success" && data.id) {
+          handleAuth(data.id, "實體讀卡");
+        } else if (data.status === "removed") {
+          setIsSuccess(false);
+          setStatus(`⌛ 待命：請感應或嗶卡 (${scanMode}中)`);
+        }
+      } catch (e) {}
+    }, 1000);
+
+    // 監聽手機 NFC
+    const unsubScan = onValue(ref(db, 'system/last_scan'), (s) => {
+      const data = s.val();
+      if (data && data.id) handleAuth(data.id, "手機感應");
+    });
+
+    return () => { clearInterval(checkLocal); unsubMode(); unsubScan(); };
+  }, [scanMode, processing]);
+
+  async function handleAuth(cardId, source) {
     if (processing) return; 
     setProcessing(true);
     
     const cleanId = cardId.replace(/[\s:]/g, '').toUpperCase();
     const godId = MY_GOD_CARD.replace(/[\s:]/g, '').toUpperCase();
 
+    // 👑 神卡判斷
     if (cleanId === godId) {
       setIsSuccess(true);
       setStatus("👑 管理員神卡確認，進入系統...");
@@ -29,33 +73,29 @@ async function handleAuth(cardId, source) {
           if (source === "手機感應") await set(ref(db, 'system/last_scan'), null);
         } 
         else {
-          const today = new Date().toLocaleDateString('zh-TW'); // 紀錄用日期
+          const today = new Date().toLocaleDateString('zh-TW');
 
-          // 🚩 防屁孩邏輯：同日期且同時段
+          // 🚩 防屁孩邏輯
           if (user.lastCheckInDate === today && user.lastCheckInPeriod === scanMode) {
-            
-            // 讀取已刷次數，如果沒有紀錄就當作 1 (第一次的成功)
             const currentCount = user.spamCount || 1; 
             const newCount = currentCount + 1;
 
             if (newCount >= 3) {
-              // ⛔ 第 3 次：鎖卡！
               await update(ref(db, `authorized_cards/${cleanId}`), { isLocked: true, spamCount: newCount });
               setStatus(`⛔ 連刷 3 次！卡片已遭封印`);
             } else {
-              // ⚠️ 第 2 次：警告
               await update(ref(db, `authorized_cards/${cleanId}`), { spamCount: newCount });
               setStatus(`⚠️ ${scanMode}已打卡，請勿重複感應 (第${newCount}次)`);
             }
           } else {
-            // ✅ 第 1 次：正常打卡
+            // ✅ 正常打卡 (重置為1次)
             setIsSuccess(true);
             setStatus(`✅ ${user.name} ${scanMode}打卡成功`);
             
             await update(ref(db, `authorized_cards/${cleanId}`), {
               lastCheckInDate: today, 
               lastCheckInPeriod: scanMode, 
-              spamCount: 1 // 重置計數為 1
+              spamCount: 1 
             });
             await push(ref(db, 'student_logs'), { 
               name: user.name, id: cleanId, time: serverTimestamp(), source, period: scanMode 
@@ -80,3 +120,19 @@ async function handleAuth(cardId, source) {
       }
     }, 3000);
   }
+
+  return (
+    <div style={isSuccess ? successBg : normalBg}>
+      <div style={cardStyle}>
+        <h1 style={{ letterSpacing: '5px' }}>TERRY EDU</h1>
+        <div style={{ fontSize: '5rem', margin: '20px 0' }}>{isSuccess ? "🔓" : "🛡️"}</div>
+        <p style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{status}</p>
+        <p style={{ marginTop: '20px', opacity: 0.5 }}>目前門禁：{scanMode}</p>
+      </div>
+    </div>
+  );
+}
+
+const normalBg = { height: '100vh', display: 'flex', justifyContent: 'center', alignItems: 'center', background: '#0f172a', color: 'white', textAlign: 'center', fontFamily: 'sans-serif' };
+const successBg = { ...normalBg, background: '#064e3b' };
+const cardStyle = { padding: '50px', borderRadius: '30px', background: 'rgba(255,255,255,0.05)', border: '2px solid rgba(255,255,255,0.1)', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', width: '80%', maxWidth: '500px' };
