@@ -1,72 +1,79 @@
 import { useEffect, useState } from 'react';
+import { Html5QrcodeScanner } from "html5-qrcode";
 import { db } from '../lib/firebase';
-import { ref, onValue, get, push, set, serverTimestamp } from 'firebase/database';
+import { ref, get, push, set, serverTimestamp } from 'firebase/database';
 
 export default function UnifiedScanStation() {
-  const [status, setStatus] = useState("⌛ 系統待命列隊中...");
+  const [status, setStatus] = useState("⌛ 系統待命：請感應卡片或掃描條碼");
   const [isSuccess, setIsSuccess] = useState(false);
 
   useEffect(() => {
-    // 監聽感應紀錄 (NFC/ID)
-    const scanRef = ref(db, 'system/last_scan');
-    const unsubscribe = onValue(scanRef, async (snapshot) => {
-      const data = snapshot.val();
-      if (data && data.id) {
-        handleProcess(data.id, "NFC/ID");
-      }
+    // --- A. 條碼掃描初始化 ---
+    const scanner = new Html5QrcodeScanner("reader", { 
+      fps: 10, 
+      qrbox: { width: 250, height: 150 } // 設定為長方形適合掃描條碼
     });
 
-    // 處理感應流程
+    scanner.render((decodedText) => {
+      // 掃到條碼後的動作
+      handleProcess(decodedText, "BARCODE");
+    }, (error) => {
+      // 掃描中的正常錯誤忽略
+    });
+
+    // --- B. 原有的 NFC 監聽邏輯 ---
+    const scanRef = ref(db, 'system/last_scan');
+    const unsubscribe = onValue(scanRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data && data.id) handleProcess(data.id, "NFC/ID");
+    });
+
+    // --- C. 統一處理中心 ---
     async function handleProcess(cardId, type) {
+      if (isSuccess) return; // 防止重複觸發
+
       const cleanId = cardId.replace(/[\s:]/g, '').toUpperCase();
-      
-      // 1. 先查老師名單
       const teacherSnap = await get(ref(db, `authorized_cards/${cleanId}`));
       
       if (teacherSnap.exists()) {
-        const teacher = teacherSnap.val();
-        setStatus(`🍎 老師好：${teacher.name}`);
-        setIsSuccess(true);
-        // 老師卡感應後清空雲端並跳轉 (或是依組長需求停留在這)
-        await set(ref(db, 'system/last_scan'), null);
-        // setTimeout(() => router.push('/admin'), 1500); 
-      } 
-      else {
-        // 2. 不是老師，就視為學生打卡
-        setStatus(`🎒 學生打卡成功：${cardId.substring(0,8)}`);
-        setIsSuccess(true);
-        
-        // 存入學生打卡紀錄
-        await push(ref(db, 'student_logs'), {
-          id: cardId,
-          time: serverTimestamp(),
-          type: type
-        });
-
-        // 🚩 關鍵：學生打卡完後立刻清空 ID，讓下一位能感應
-        await set(ref(db, 'system/last_scan'), null);
+        setStatus(`🍎 老師好：${teacherSnap.val().name}`);
+      } else {
+        setStatus(`🎒 學生打卡成功：${cleanId}`);
+        await push(ref(db, 'student_logs'), { id: cleanId, time: serverTimestamp(), type: type });
       }
 
-      // 3 秒後恢復待機狀態
+      setIsSuccess(true);
+      await set(ref(db, 'system/last_scan'), null); // 清空 NFC 狀態
+
       setTimeout(() => {
         setIsSuccess(false);
-        setStatus("⌛ 系統待命列隊中...");
+        setStatus("⌛ 系統待命：請感應卡片或掃描條碼");
       }, 3000);
     }
 
-    return () => unsubscribe();
-  }, []);
+    return () => {
+      scanner.clear();
+      unsubscribe();
+    };
+  }, [isSuccess]);
 
   return (
     <div style={isSuccess ? successBg : normalBg}>
-      <h1 style={{ fontSize: '4rem' }}>{isSuccess ? "PASS" : "TERRY EDU"}</h1>
-      <p style={{ fontSize: '2rem' }}>{status}</p>
-      <div style={{ marginTop: '50px', fontSize: '1.2rem', opacity: 0.5 }}>
-        支援：學生證 / 悠遊卡 / 健保卡
+      <h1 style={{ fontSize: '2.5rem' }}>{isSuccess ? "PASS" : "TERRY EDU 感應站"}</h1>
+      
+      {/* 條碼掃描顯示區域 */}
+      {!isSuccess && (
+        <div id="reader" style={{ width: '300px', margin: '20px auto', background: 'white', borderRadius: '10px' }}></div>
+      )}
+      
+      <p style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{status}</p>
+      
+      <div style={{ marginTop: '20px', fontSize: '0.9rem', opacity: 0.6 }}>
+        支援：身分證條碼 / 學生證條碼 / NFC / IC 卡
       </div>
     </div>
   );
 }
 
-const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', background: '#0f172a', color: 'white', transition: '0.5s' };
+const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', background: '#0f172a', color: 'white', transition: '0.5s', textAlign: 'center' };
 const successBg = { ...normalBg, background: '#064e3b' };
