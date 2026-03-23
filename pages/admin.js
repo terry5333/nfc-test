@@ -3,7 +3,7 @@ import { db } from '../lib/firebase';
 import { ref, onValue, set, remove, push, update } from 'firebase/database';
 
 export default function AdminDashboard() {
-  const [activeTab, setActiveTab] = useState('students');
+  const [activeTab, setActiveTab] = useState('students'); // students, attendance, teachers, locked
   const [lastScan, setLastScan] = useState("");
   const [scanMode, setScanMode] = useState("上學");
 
@@ -15,6 +15,7 @@ export default function AdminDashboard() {
   const [newStudent, setNewStudent] = useState({ classInfo: '', seat: '', name: '' });
   const [newTeacherName, setNewTeacherName] = useState("");
   const [bindingTarget, setBindingTarget] = useState(null);
+  const [unlockTarget, setUnlockTarget] = useState(null); // 🚩 新增：正在處刑(解卡)的對象
 
   const [queryDate, setQueryDate] = useState(() => {
     const tzOffset = (new Date()).getTimezoneOffset() * 60000;
@@ -55,6 +56,7 @@ export default function AdminDashboard() {
     return () => { clearInterval(checkLocal); unsubMode(); unsubScan(); unsubStudents(); unsubCards(); unsubLogs(); };
   }, []);
 
+  // --- 操作邏輯 ---
   const toggleScanMode = async () => {
     const newMode = scanMode === '上學' ? '放學' : '上學';
     await set(ref(db, 'system/settings/scanMode'), newMode);
@@ -66,7 +68,10 @@ export default function AdminDashboard() {
     setNewStudent({ classInfo: '', seat: '', name: '' });
   };
 
-  const startBinding = (student) => { setBindingTarget(student); setLastScan(""); };
+  const startBinding = (student) => { setBindingTarget(student); setUnlockTarget(null); setLastScan(""); };
+  
+  // 🚩 啟動實體解卡程序
+  const startUnlock = (student) => { setUnlockTarget(student); setBindingTarget(null); setLastScan(""); };
 
   const confirmBinding = async () => {
     if (!lastScan || !bindingTarget) return;
@@ -79,9 +84,21 @@ export default function AdminDashboard() {
     alert("✅ 學生綁卡成功！");
   };
 
-  const handleUnlock = async (cardId) => {
-    await update(ref(db, `authorized_cards/${cardId}`), { isLocked: false, spamCount: 0 });
-    alert("🔓 已解除封印！");
+  // 🚩 確認實體解卡
+  const confirmUnlock = async () => {
+    if (!lastScan || !unlockTarget) return;
+    
+    // 嚴格比對：拿來的卡必須是那張被鎖的卡
+    if (lastScan !== unlockTarget.cardId) {
+      alert(`❌ 警告：這不是 【${unlockTarget.name}】 被封印的那張卡！請拿原卡來解鎖。`);
+      setLastScan("");
+      return;
+    }
+
+    await update(ref(db, `authorized_cards/${unlockTarget.cardId}`), { isLocked: false, spamCount: 0 });
+    setUnlockTarget(null);
+    setLastScan("");
+    alert("🔓 封印解除！卡片已恢復正常。");
   };
 
   const handleAddTeacher = async () => {
@@ -91,7 +108,6 @@ export default function AdminDashboard() {
     alert("✅ 老師註冊成功！");
   };
 
-  // 🚩 精準日期配對
   const generateDailyReport = () => {
     const dailyStatus = {};
     logs.forEach(log => {
@@ -113,10 +129,13 @@ export default function AdminDashboard() {
       return a.seat.padStart(2, '0').localeCompare(b.seat.padStart(2, '0'));
     });
 
-    return { sortedStudents, dailyStatus };
+    // 🚩 抓出所有被鎖定(封印)的學生
+    const lockedStudents = sortedStudents.filter(s => s.cardId && authCards[s.cardId]?.isLocked);
+
+    return { sortedStudents, dailyStatus, lockedStudents };
   };
 
-  const { sortedStudents, dailyStatus } = generateDailyReport();
+  const { sortedStudents, dailyStatus, lockedStudents } = generateDailyReport();
 
   const exportToHeFeng = () => {
     let csvContent = "data:text/csv;charset=utf-8,\uFEFF班級,座號,學生姓名,上學狀態,放學狀態\n";
@@ -147,10 +166,15 @@ export default function AdminDashboard() {
           <button onClick={() => setActiveTab('students')} style={activeTab === 'students' ? activeBtn : btn}>壹。生徒登錄</button>
           <button onClick={() => setActiveTab('attendance')} style={activeTab === 'attendance' ? activeBtn : btn}>貳。出勤日報表</button>
           <button onClick={() => setActiveTab('teachers')} style={activeTab === 'teachers' ? activeBtn : btn}>參。教師名簿</button>
+          {/* 🚩 獨立解卡專區 */}
+          <button onClick={() => setActiveTab('locked')} style={activeTab === 'locked' ? activeLockedBtn : lockedBtn}>
+            肆。封印解除 {lockedStudents.length > 0 && <span style={badge}>{lockedStudents.length}</span>}
+          </button>
         </div>
       </header>
 
       <main style={mainContent}>
+        {/* 生徒名冊 */}
         {activeTab === 'students' && (
           <div>
             <h2 style={sectionTitle}>🎒 生徒名冊與識別卷發放</h2>
@@ -181,12 +205,11 @@ export default function AdminDashboard() {
                     <tr key={s.dbId} style={isLocked ? {background: '#f8d7da'} : {}}>
                       <td>{s.classInfo}</td><td>{s.seat}</td><td><b style={{color: isLocked ? '#9b2226' : 'inherit'}}>{s.name}</b></td>
                       <td>
-                        {s.cardId ? (isLocked ? <span style={{color:'#9b2226'}}>🔒 鎖定中</span> : <span style={{color:'#2d6a4f'}}>✅ 正常</span>) : <span style={{color:'#888'}}>未發放</span>}
+                        {s.cardId ? (isLocked ? <span style={{color:'#9b2226'}}>🔒 封印中</span> : <span style={{color:'#2d6a4f'}}>✅ 正常</span>) : <span style={{color:'#888'}}>未發放</span>}
                       </td>
                       <td>
                         {!s.cardId && <button onClick={() => startBinding(s)} style={actionBtn}>+ 綁定</button>}
-                        {isLocked && <button onClick={() => handleUnlock(s.cardId)} style={unlockBtn}>🔓 恩赦</button>}
-                        {s.cardId && !isLocked && <button onClick={() => remove(ref(db, `authorized_cards/${s.cardId}`)).then(()=>set(ref(db, `school_roster/${s.dbId}/cardId`), null))} style={cancelBtn}>收回</button>}
+                        {s.cardId && <button onClick={() => remove(ref(db, `authorized_cards/${s.cardId}`)).then(()=>set(ref(db, `school_roster/${s.dbId}/cardId`), null))} style={cancelBtn}>收回</button>}
                       </td>
                     </tr>
                   )
@@ -196,6 +219,7 @@ export default function AdminDashboard() {
           </div>
         )}
 
+        {/* 出勤日報表 */}
         {activeTab === 'attendance' && (
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '15px' }}>
@@ -222,12 +246,8 @@ export default function AdminDashboard() {
                         <td>{s.classInfo}</td>
                         <td>{s.seat}</td>
                         <td style={{fontWeight:'bold'}}>{s.name}</td>
-                        <td style={{color: status['上學'] ? '#2d6a4f' : '#8c3b3a', fontWeight: 'bold'}}>
-                          {status['上學'] ? `✅ ${status['上學']}` : '❌ 未打卡'}
-                        </td>
-                        <td style={{color: status['放學'] ? '#2d6a4f' : '#8c3b3a', fontWeight: 'bold'}}>
-                          {status['放學'] ? `✅ ${status['放學']}` : '❌ 未打卡'}
-                        </td>
+                        <td style={{color: status['上學'] ? '#2d6a4f' : '#8c3b3a', fontWeight: 'bold'}}>{status['上學'] ? `✅ ${status['上學']}` : '❌ 未打卡'}</td>
+                        <td style={{color: status['放學'] ? '#2d6a4f' : '#8c3b3a', fontWeight: 'bold'}}>{status['放學'] ? `✅ ${status['放學']}` : '❌ 未打卡'}</td>
                       </tr>
                     )
                   })
@@ -237,6 +257,7 @@ export default function AdminDashboard() {
           </div>
         )}
 
+        {/* 老師管理 */}
         {activeTab === 'teachers' && (
           <div>
             <h2 style={sectionTitle}>🍎 教職員特許名簿</h2>
@@ -258,6 +279,56 @@ export default function AdminDashboard() {
             </table>
           </div>
         )}
+
+        {/* 🚩 肆。封印解除專區 */}
+        {activeTab === 'locked' && (
+          <div>
+            <h2 style={{...sectionTitle, borderLeftColor: '#9b2226', color: '#9b2226'}}>⛔ 謹慎者名簿 (鎖卡區)</h2>
+            <p style={{ color: '#5a3d31', fontWeight: 'bold', marginBottom: '20px' }}>
+              ※ 學生必須持原卡片親自至辦公室，進行感應後方可解除封印。
+            </p>
+
+            {unlockTarget && (
+              <div style={lockedAlertBox}>
+                <h3 style={{margin: '0 0 10px 0', color: '#9b2226'}}>⚖️ 解卡儀式進行中：【 {unlockTarget.name} 】</h3>
+                <p style={{fontSize: '1.2rem', margin: '10px 0'}}>
+                  👉 請犯規學生將卡片放置於感應區... 
+                </p>
+                <p style={{fontSize: '1.2rem', fontWeight: 'bold', margin: '15px 0'}}>
+                  目前感應晶片：<code style={{...codeBlock, fontSize: '1.2rem'}}>{lastScan || "等待感應..."}</code>
+                </p>
+                <div>
+                  {lastScan === unlockTarget.cardId ? (
+                    <button onClick={confirmUnlock} style={massiveUnlockBtn}>✨ 確認恩赦 (解除封印)</button>
+                  ) : lastScan ? (
+                    <span style={{color: '#9b2226', fontWeight: 'bold', fontSize: '1.1rem'}}>❌ 卡號不符！這不是被鎖的那張卡！</span>
+                  ) : null}
+                  <button onClick={() => {setUnlockTarget(null); setLastScan("");}} style={cancelBtn}>中斷程序</button>
+                </div>
+              </div>
+            )}
+
+            <table style={table}>
+              <thead><tr><th>班級</th><th>座號</th><th>氏名</th><th>被封印的卡號</th><th>處置</th></tr></thead>
+              <tbody>
+                {lockedStudents.length === 0 ? (
+                  <tr><td colSpan="5" style={{textAlign: 'center', padding: '20px', color: '#2d6a4f', fontWeight: 'bold'}}>🎉 太平盛世，目前無人被鎖卡！</td></tr>
+                ) : (
+                  lockedStudents.map(s => (
+                    <tr key={s.dbId} style={{background: '#f8d7da'}}>
+                      <td>{s.classInfo}</td><td>{s.seat}</td>
+                      <td><b style={{color: '#9b2226'}}>{s.name}</b></td>
+                      <td><code style={codeBlock}>{s.cardId}</code></td>
+                      <td>
+                        <button onClick={() => startUnlock(s)} style={prepareUnlockBtn}>🔓 準備解卡</button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </main>
     </div>
   );
@@ -275,6 +346,12 @@ const modeBtnEvening = { ...modeBtnMorning, background: '#5c7a5f', color: '#f4ec
 const tabs = { display: 'flex', justifyContent: 'center', gap: '15px' };
 const btn = { padding: '8px 20px', border: '2px solid #3e2723', background: '#eaddc5', color: '#3e2723', fontFamily: '"Noto Serif TC", serif', fontSize: '1.1rem', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723' };
 const activeBtn = { ...btn, background: '#3e2723', color: '#f4ecd8', boxShadow: 'none', transform: 'translate(2px, 2px)' };
+
+// 🚩 鎖卡區特製按鈕樣式
+const lockedBtn = { ...btn, background: '#f8d7da', borderColor: '#9b2226', color: '#9b2226', fontWeight: 'bold' };
+const activeLockedBtn = { ...lockedBtn, background: '#9b2226', color: '#fff', boxShadow: 'none', transform: 'translate(2px, 2px)' };
+const badge = { background: '#ef4444', color: 'white', padding: '2px 8px', borderRadius: '10px', fontSize: '0.9rem', marginLeft: '5px' };
+
 const mainContent = { maxWidth: '1000px', margin: '0 auto', background: '#fffcf5', padding: '30px', border: '2px solid #3e2723', boxShadow: '5px 5px 0px #3e2723' };
 const sectionTitle = { borderLeft: '8px solid #8c3b3a', paddingLeft: '15px', color: '#3e2723', marginTop: '0', marginBottom: '15px' };
 const formCard = { display: 'flex', gap: '10px', padding: '20px', background: '#eaddc5', border: '1px solid #3e2723', marginBottom: '25px', alignItems: 'center' };
@@ -282,17 +359,21 @@ const input = { padding: '8px 12px', border: '1px solid #3e2723', background: '#
 const dateInput = { ...input, flex: 'none', width: '150px', fontWeight: 'bold' };
 
 const actionBtn = { padding: '8px 20px', background: '#5c7a5f', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', fontWeight: 'bold', boxShadow: '2px 2px 0px #3e2723' };
-const cancelBtn = { padding: '8px 15px', background: '#8c3b3a', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723' };
+const cancelBtn = { padding: '8px 15px', background: '#8c3b3a', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', marginLeft: '10px' };
 const confirmBtn = { padding: '8px 15px', background: '#d9b650', color: '#3e2723', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', fontWeight: 'bold' };
-const unlockBtn = { padding: '8px 15px', background: '#d97750', color: '#fffcf5', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', fontWeight: 'bold', marginRight: '5px' };
 const exportBtn = { padding: '8px 20px', background: '#3b82f6', color: '#fff', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', fontWeight: 'bold', boxShadow: '2px 2px 0px #3e2723' };
 const alertBox = { padding: '20px', background: '#f5e6d3', border: '2px dashed #8c3b3a', marginBottom: '25px', color: '#3e2723' };
 const codeBlock = { background: '#dcd3c6', padding: '2px 8px', border: '1px solid #a89f91', fontFamily: 'monospace' };
+
+// 🚩 鎖卡專區特製樣式
+const lockedAlertBox = { padding: '25px', background: '#f8d7da', border: '3px solid #9b2226', marginBottom: '25px', color: '#3e2723', boxShadow: 'inset 0 0 15px rgba(155, 34, 38, 0.2)' };
+const prepareUnlockBtn = { padding: '8px 15px', background: '#d9b650', color: '#3e2723', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', fontWeight: 'bold' };
+const massiveUnlockBtn = { padding: '15px 30px', background: '#2d6a4f', color: '#fff', border: '3px solid #143628', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '4px 4px 0px #143628', fontWeight: 'bold', fontSize: '1.2rem', marginRight: '15px', animation: 'pulse 1.5s infinite' };
 
 const table = { width: '100%', borderCollapse: 'collapse', textAlign: 'left', marginTop: '10px', border: '2px solid #3e2723' };
 
 if (typeof document !== 'undefined') {
   const style = document.createElement('style');
-  style.innerHTML = `th, td { border: 1px solid #3e2723; padding: 12px 15px; } th { background: #dcd3c6; color: #3e2723; font-weight: bold; letter-spacing: 2px; } tr:nth-child(even) { background: #fbf8f1; }`;
+  style.innerHTML = `th, td { border: 1px solid #3e2723; padding: 12px 15px; } th { background: #dcd3c6; color: #3e2723; font-weight: bold; letter-spacing: 2px; } tr:nth-child(even) { background: #fbf8f1; } @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }`;
   document.head.appendChild(style);
 }
