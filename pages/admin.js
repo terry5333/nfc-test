@@ -5,10 +5,10 @@ import { ref, onValue, set, remove, push, update } from 'firebase/database';
 export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('students');
   const [lastScan, setLastScan] = useState("");
-  const [scanMode, setScanMode] = useState("上學"); // 門禁總開關狀態
+  const [scanMode, setScanMode] = useState("上學");
 
   const [students, setStudents] = useState([]);
-  const [authCards, setAuthCards] = useState({}); // 存放所有卡片的詳細狀態 (包含鎖卡資訊)
+  const [authCards, setAuthCards] = useState({});
   const [teachers, setTeachers] = useState([]);
   const [logs, setLogs] = useState([]);
 
@@ -16,11 +16,14 @@ export default function AdminDashboard() {
   const [newTeacherName, setNewTeacherName] = useState("");
   const [bindingTarget, setBindingTarget] = useState(null);
 
-  useEffect(() => {
-    // 1. 監聽門禁總開關
-    const unsubMode = onValue(ref(db, 'system/settings/scanMode'), (s) => setScanMode(s.val() || "上學"));
+  // 🚩 新增：查詢日期的狀態 (預設為今天)
+  const [queryDate, setQueryDate] = useState(() => {
+    const tzOffset = (new Date()).getTimezoneOffset() * 60000;
+    return new Date(Date.now() - tzOffset).toISOString().split('T')[0];
+  });
 
-    // 2. 監聽地端 Python (USB 讀卡機)
+  useEffect(() => {
+    const unsubMode = onValue(ref(db, 'system/settings/scanMode'), (s) => setScanMode(s.val() || "上學"));
     const checkLocal = setInterval(async () => {
       try {
         const res = await fetch('http://localhost:5000/scan');
@@ -29,7 +32,6 @@ export default function AdminDashboard() {
       } catch (e) {}
     }, 1000);
 
-    // 3. 監聽雲端與資料庫
     const unsubScan = onValue(ref(db, 'system/last_scan'), (s) => {
       const data = s.val();
       if (data && data.id) setLastScan(data.id.replace(/[\s:]/g, '').toUpperCase());
@@ -42,7 +44,7 @@ export default function AdminDashboard() {
     
     const unsubCards = onValue(ref(db, 'authorized_cards'), (s) => {
       const data = s.val() || {};
-      setAuthCards(data); // 儲存所有卡片資訊以便查閱鎖定狀態
+      setAuthCards(data);
       setTeachers(Object.keys(data).map(k => ({ cardId: k, ...data[k] })).filter(item => item.role === 'teacher'));
     });
     
@@ -91,49 +93,71 @@ export default function AdminDashboard() {
     alert("✅ 老師註冊成功！");
   };
 
-  const exportToHeFeng = () => {
-    if (logs.length === 0) return alert("目前沒有打卡紀錄可匯出！");
-    let csvContent = "data:text/csv;charset=utf-8,\uFEFF打卡日期,打卡時間,學生姓名,感應卡號,打卡狀態\n";
+  // 🚩 資料處理：將學生名冊與當日打卡紀錄進行交叉比對
+  const generateDailyReport = () => {
+    // 1. 整理當日打卡資料 (依據卡號)
+    const dailyStatus = {};
     logs.forEach(log => {
       const d = new Date(log.time);
-      csvContent += `${d.toLocaleDateString('zh-TW')},${d.toLocaleTimeString('zh-TW', { hour12: false })},${log.name || "未命名"},${log.id || ""},${log.period || "正常"}\n`;
+      const tzOffset = d.getTimezoneOffset() * 60000;
+      const logDate = new Date(d.getTime() - tzOffset).toISOString().split('T')[0];
+      
+      if (logDate === queryDate && log.id) {
+        if (!dailyStatus[log.id]) dailyStatus[log.id] = {};
+        dailyStatus[log.id][log.period] = d.toLocaleTimeString('zh-TW', { hour12: false });
+      }
+    });
+
+    // 2. 排序學生 (先排班級，再排座號)
+    const sortedStudents = [...students].sort((a, b) => {
+      if (a.classInfo !== b.classInfo) return a.classInfo.localeCompare(b.classInfo);
+      return a.seat.padStart(2, '0').localeCompare(b.seat.padStart(2, '0'));
+    });
+
+    return { sortedStudents, dailyStatus };
+  };
+
+  const { sortedStudents, dailyStatus } = generateDailyReport();
+
+  // 🚩 匯出禾豐 CSV (進化版：直接匯出日報表矩陣)
+  const exportToHeFeng = () => {
+    let csvContent = "data:text/csv;charset=utf-8,\uFEFF班級,座號,學生姓名,上學狀態,放學狀態\n";
+    sortedStudents.forEach(s => {
+      const status = s.cardId ? (dailyStatus[s.cardId] || {}) : {};
+      const morning = status['上學'] || "未打卡";
+      const evening = status['放學'] || "未打卡";
+      csvContent += `${s.classInfo},${s.seat},${s.name},${morning},${evening}\n`;
     });
     const link = document.createElement("a");
     link.href = encodeURI(csvContent);
-    link.download = `禾豐打卡匯出_${new Date().toLocaleDateString('zh-TW').replace(/\//g, '')}.csv`;
+    link.download = `禾豐出缺席日報表_${queryDate.replace(/-/g, '')}.csv`;
     document.body.appendChild(link); link.click(); document.body.removeChild(link);
   };
 
-  // --- 昭和風介面渲染 ---
   return (
     <div style={layout}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700&display=swap');`}</style>
-      
       <header style={header}>
         <h1 style={title}>TerryEdu 案內所</h1>
-        
-        {/* 門禁總開關 */}
         <div style={modeSwitchContainer}>
           <span style={{ fontWeight: 'bold', marginRight: '15px', fontSize: '1.2rem' }}>⛩️ 現在門禁狀態：</span>
           <button onClick={toggleScanMode} style={scanMode === '上學' ? modeBtnMorning : modeBtnEvening}>
             {scanMode === '上學' ? '🌅 登校 (上學) 收集中' : '🌇 下校 (放學) 收集中'}
           </button>
-          <p style={{ fontSize: '0.85rem', color: '#8c3b3a', marginTop: '10px', margin: '10px 0 0 0' }}>
-            ※ 點擊木牌切換。全校打卡機將同步切換為此狀態，並套用防呆機制。
-          </p>
         </div>
-
         <div style={tabs}>
           <button onClick={() => setActiveTab('students')} style={activeTab === 'students' ? activeBtn : btn}>壹。生徒登錄</button>
-          <button onClick={() => setActiveTab('attendance')} style={activeTab === 'attendance' ? activeBtn : btn}>貳。出勤紀錄</button>
+          <button onClick={() => setActiveTab('attendance')} style={activeTab === 'attendance' ? activeBtn : btn}>貳。出勤日報表</button>
           <button onClick={() => setActiveTab('teachers')} style={activeTab === 'teachers' ? activeBtn : btn}>參。教師名簿</button>
         </div>
       </header>
 
       <main style={mainContent}>
+        {/* 生徒登錄 (略...與前版相同) */}
         {activeTab === 'students' && (
           <div>
             <h2 style={sectionTitle}>🎒 生徒名冊與識別卷發放</h2>
+            {/* 新增表單 */}
             <div style={formCard}>
               <input placeholder="班級 (例:201)" value={newStudent.classInfo} onChange={e => setNewStudent({...newStudent, classInfo: e.target.value})} style={input} />
               <input placeholder="座號 (例:05)" value={newStudent.seat} onChange={e => setNewStudent({...newStudent, seat: e.target.value})} style={input} />
@@ -141,10 +165,11 @@ export default function AdminDashboard() {
               <button onClick={handleAddStudent} style={actionBtn}>記入</button>
             </div>
 
+            {/* 綁卡等待區 */}
             {bindingTarget && (
               <div style={alertBox}>
                 <p style={{margin: 0, fontWeight: 'bold'}}>⚠️ 正在為【 {bindingTarget.name} 】發放識別卷</p>
-                <p style={{margin: '10px 0'}}>請將卡片放置於感應區... 目前讀取: <code style={codeBlock}>{lastScan || "待機中"}</code></p>
+                <p style={{margin: '10px 0'}}>請感應... 目前讀取: <code style={codeBlock}>{lastScan || "待機中"}</code></p>
                 <div>
                   {lastScan && <button onClick={confirmBinding} style={confirmBtn}>確認發放</button>}
                   <button onClick={() => setBindingTarget(null)} style={cancelBtn}>取消</button>
@@ -156,15 +181,12 @@ export default function AdminDashboard() {
               <thead><tr><th>班級</th><th>座號</th><th>氏名</th><th>識別卷狀態</th><th>處置</th></tr></thead>
               <tbody>
                 {students.map(s => {
-                  const cardData = s.cardId ? authCards[s.cardId] : null;
-                  const isLocked = cardData?.isLocked;
+                  const isLocked = s.cardId ? authCards[s.cardId]?.isLocked : false;
                   return (
                     <tr key={s.dbId} style={isLocked ? {background: '#f8d7da'} : {}}>
                       <td>{s.classInfo}</td><td>{s.seat}</td><td><b style={{color: isLocked ? '#9b2226' : 'inherit'}}>{s.name}</b></td>
                       <td>
-                        {s.cardId 
-                          ? (isLocked ? <span style={{color:'#9b2226', fontWeight:'bold'}}>🔒 謹慎中 (鎖定)</span> : <span style={{color:'#2d6a4f', fontWeight:'bold'}}>✅ 正常運作</span>) 
-                          : <span style={{color:'#888'}}>未發放</span>}
+                        {s.cardId ? (isLocked ? <span style={{color:'#9b2226'}}>🔒 鎖定中</span> : <span style={{color:'#2d6a4f'}}>✅ 正常</span>) : <span style={{color:'#888'}}>未發放</span>}
                       </td>
                       <td>
                         {!s.cardId && <button onClick={() => startBinding(s)} style={actionBtn}>+ 綁定</button>}
@@ -179,28 +201,49 @@ export default function AdminDashboard() {
           </div>
         )}
 
+        {/* 🚩 查勤日報表大改版 */}
         {activeTab === 'attendance' && (
           <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h2 style={sectionTitle}>🕰️ 本日出勤帳</h2>
-              <button onClick={exportToHeFeng} style={exportBtn}>📥 匯出禾豐 CSV</button>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '15px' }}>
+              <div>
+                <h2 style={sectionTitle}>🕰️ 每日出缺席報表</h2>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft: '15px' }}>
+                  <label style={{ fontWeight: 'bold' }}>🗓️ 選擇日期：</label>
+                  <input type="date" value={queryDate} onChange={(e) => setQueryDate(e.target.value)} style={dateInput} />
+                </div>
+              </div>
+              <button onClick={exportToHeFeng} style={exportBtn}>📥 匯出 {queryDate} 報表</button>
             </div>
+            
             <table style={table}>
-              <thead><tr><th>時段</th><th>刻 (時間)</th><th>氏名 (姓名)</th><th>識別番號</th></tr></thead>
+              <thead><tr><th>班級</th><th>座號</th><th>氏名 (姓名)</th><th>🌅 登校 (上學)</th><th>🌇 下校 (放學)</th></tr></thead>
               <tbody>
-                {logs.slice(0, 100).map((log, i) => (
-                  <tr key={i}>
-                    <td style={{color: log.period === '上學' ? '#2d6a4f' : '#8c3b3a', fontWeight: 'bold'}}>{log.period || '紀錄'}</td>
-                    <td>{new Date(log.time).toLocaleString('zh-TW')}</td>
-                    <td style={{fontWeight:'bold', color:'#3e2723'}}>{log.name}</td>
-                    <td><code style={codeBlock}>{log.id}</code></td>
-                  </tr>
-                ))}
+                {sortedStudents.length === 0 ? (
+                  <tr><td colSpan="5" style={{textAlign: 'center', padding: '20px'}}>請先至「生徒登錄」建立學生名冊</td></tr>
+                ) : (
+                  sortedStudents.map(s => {
+                    const status = s.cardId ? (dailyStatus[s.cardId] || {}) : {};
+                    return (
+                      <tr key={s.dbId}>
+                        <td>{s.classInfo}</td>
+                        <td>{s.seat}</td>
+                        <td style={{fontWeight:'bold'}}>{s.name}</td>
+                        <td style={{color: status['上學'] ? '#2d6a4f' : '#8c3b3a', fontWeight: 'bold'}}>
+                          {status['上學'] ? `✅ ${status['上學']}` : '❌ 未打卡'}
+                        </td>
+                        <td style={{color: status['放學'] ? '#2d6a4f' : '#8c3b3a', fontWeight: 'bold'}}>
+                          {status['放學'] ? `✅ ${status['放學']}` : '❌ 未打卡'}
+                        </td>
+                      </tr>
+                    )
+                  })
+                )}
               </tbody>
             </table>
           </div>
         )}
 
+        {/* 教師名簿 (略...與前版相同) */}
         {activeTab === 'teachers' && (
           <div>
             <h2 style={sectionTitle}>🍎 教職員特許名簿</h2>
@@ -209,7 +252,6 @@ export default function AdminDashboard() {
               <input placeholder="輸入教職員姓名" value={newTeacherName} onChange={e => setNewTeacherName(e.target.value)} style={input} />
               <button onClick={handleAddTeacher} style={actionBtn}>特許發放</button>
             </div>
-            
             <table style={table}>
               <thead><tr><th>教職員氏名</th><th>識別番號</th><th>處置</th></tr></thead>
               <tbody>
@@ -241,9 +283,10 @@ const tabs = { display: 'flex', justifyContent: 'center', gap: '15px' };
 const btn = { padding: '8px 20px', border: '2px solid #3e2723', background: '#eaddc5', color: '#3e2723', fontFamily: '"Noto Serif TC", serif', fontSize: '1.1rem', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723' };
 const activeBtn = { ...btn, background: '#3e2723', color: '#f4ecd8', boxShadow: 'none', transform: 'translate(2px, 2px)' };
 const mainContent = { maxWidth: '1000px', margin: '0 auto', background: '#fffcf5', padding: '30px', border: '2px solid #3e2723', boxShadow: '5px 5px 0px #3e2723' };
-const sectionTitle = { borderLeft: '8px solid #8c3b3a', paddingLeft: '15px', color: '#3e2723', marginTop: '0' };
+const sectionTitle = { borderLeft: '8px solid #8c3b3a', paddingLeft: '15px', color: '#3e2723', marginTop: '0', marginBottom: '15px' };
 const formCard = { display: 'flex', gap: '10px', padding: '20px', background: '#eaddc5', border: '1px solid #3e2723', marginBottom: '25px', alignItems: 'center' };
 const input = { padding: '8px 12px', border: '1px solid #3e2723', background: '#f4ecd8', fontFamily: '"Noto Serif TC", serif', flex: 1, fontSize: '1rem', outline: 'none' };
+const dateInput = { ...input, flex: 'none', width: '150px', fontWeight: 'bold' }; // 日期選擇器樣式
 
 const actionBtn = { padding: '8px 20px', background: '#5c7a5f', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', fontWeight: 'bold', boxShadow: '2px 2px 0px #3e2723' };
 const cancelBtn = { padding: '8px 15px', background: '#8c3b3a', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723' };
