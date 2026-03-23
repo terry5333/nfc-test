@@ -7,7 +7,7 @@ export default function MobileStation() {
   const [isSuccess, setIsSuccess] = useState(false);
   const [scanModeDisplay, setScanModeDisplay] = useState("上學");
   
-  // 使用 useRef 同步最新狀態，避免連刷吃 Bug
+  // 🚩 使用 useRef 同步最新狀態，避免連刷吃 Bug
   const scanModeRef = useRef("上學");
   const processingRef = useRef(false);
   const inputRef = useRef(null);
@@ -22,12 +22,12 @@ export default function MobileStation() {
   };
 
   useEffect(() => {
-    // 1. 強制隱藏輸入框保持對焦 (給掃描槍用)
+    // 1. 強制隱藏輸入框保持對焦 (給 USB 掃描槍用)
     const keepFocus = () => inputRef.current?.focus();
     document.addEventListener('click', keepFocus);
     keepFocus();
 
-    // 2. 監聽組長的門禁總開關
+    // 2. 監聽組長的門禁總開關 (案內所切換上學/放學)
     const unsubMode = onValue(ref(db, 'system/settings/scanMode'), (s) => {
       const mode = s.val() || "上學";
       scanModeRef.current = mode;
@@ -61,18 +61,20 @@ export default function MobileStation() {
       if (snap.exists()) {
         const user = snap.val();
 
-        // ⛔ 檢查鎖定狀態
+        // ⛔ 1. 檢查鎖定狀態
         if (user.isLocked) {
           setIsSuccess(false);
           setStatus(`⛔ 卡片已鎖定：請找資訊組長`);
+          // 🚩 核心修復：把被鎖的卡號丟上雲端，讓 Admin 案內所的「肆。封印解除」區能讀到！
+          await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
         } 
-        // 🍎 老師登入
+        // 🍎 2. 老師登入
         else if (user.role === 'teacher') {
           setIsSuccess(true);
           setStatus(`✅ 歡迎 ${user.name} 老師`);
           await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
         } 
-        // 🎒 學生防屁孩邏輯
+        // 🎒 3. 學生防屁孩邏輯
         else {
           const today = getTodayStr();
 
@@ -85,6 +87,8 @@ export default function MobileStation() {
               await update(ref(db, `authorized_cards/${cleanId}`), { isLocked: true, spamCount: newCount });
               setStatus(`⛔ 連刷 3 次！卡片已遭封印`);
               setIsSuccess(false);
+              // 🚩 同樣將剛被鎖的卡號拋上雲端備查，方便組長立刻解卡
+              await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
             } else {
               // ⚠️ 警告次數
               await update(ref(db, `authorized_cards/${cleanId}`), { spamCount: newCount });
@@ -107,9 +111,10 @@ export default function MobileStation() {
           }
         }
       } else {
-        // 未註冊
+        // 🚫 未註冊卡片
         setIsSuccess(false);
         setStatus(`🚫 未註冊卡片: ${cleanId.substring(0,8)}`);
+        // 拋上雲端以利 Admin 綁卡
         await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
       }
     } catch (e) {
@@ -152,7 +157,7 @@ export default function MobileStation() {
   );
 }
 
-// 樣式
+// 樣式設定
 const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#000', color: '#fff', textAlign: 'center', fontFamily: 'sans-serif' };
 const successBg = { ...normalBg, background: '#064e3b' };
 const cardStyle = { padding: '40px 20px', borderRadius: '25px', background: '#111', border: '2px solid #333', width: '85%', maxWidth: '400px', boxShadow: '0 10px 30px rgba(0,0,0,0.8)' };
