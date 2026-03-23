@@ -1,106 +1,86 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { db } from '../lib/firebase';
 import { ref, get, set, push, serverTimestamp } from 'firebase/database';
 
 export default function MobileStation() {
-  const [status, setStatus] = useState("等待啟動...");
+  const [status, setStatus] = useState("⌛ 系統待命：請感應卡片");
   const [isDone, setIsDone] = useState(false);
-  const videoRef = useRef(null);
-  const readerRef = useRef(null); // 🚩 用來存儲掃描器實例
+  const [manualId, setManualId] = useState("");
 
-  const startSensors = async () => {
-    setStatus("🚀 專業鏡頭啟動中...");
-    
-    // 1. 啟動 NFC (Android 專屬)
+  // --- 啟動 NFC 監聽 (僅限 Android Chrome) ---
+  const startNFC = async () => {
     if ('NDEFReader' in window) {
       try {
         const ndef = new NDEFReader();
         await ndef.scan();
+        setStatus("📡 NFC 已啟動，請靠近感應");
         ndef.onreading = (event) => handleProcess(event.serialNumber, "NFC");
-      } catch (e) { console.error("NFC Error", e); }
-    }
-
-    // 2. 動態載入 ZXing 並啟動
-    try {
-      const { BrowserMultiFormatReader } = await import('@zxing/library');
-      readerRef.current = new BrowserMultiFormatReader();
-      
-      readerRef.current.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
-        if (result) {
-          handleProcess(result.getText(), "BARCODE");
-        }
-      });
-      setStatus("📡 監控中：請靠近感應或掃描");
-    } catch (err) {
-      console.error(err);
-      setStatus("❌ 鏡頭啟動失敗");
+      } catch (e) {
+        setStatus("❌ NFC 啟動失敗");
+      }
+    } else {
+      setStatus("📱 此裝置不支援 NFC (建議用實體讀卡機)");
     }
   };
 
-  // 處理感應邏輯
   const handleProcess = async (cardId, type) => {
     if (isDone) return;
     const cleanId = cardId.replace(/[\s:]/g, '').toUpperCase();
     setIsDone(true);
     if (navigator.vibrate) navigator.vibrate(200);
 
-    try {
-      const snap = await get(ref(db, `authorized_cards/${cleanId}`));
-      if (snap.exists()) {
-        const user = snap.val();
-        setStatus(`✅ ${user.name} 打卡成功`);
-        if (user.role === 'teacher') {
-          await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
-        } else {
-          await push(ref(db, 'student_logs'), { name: user.name, id: cleanId, time: serverTimestamp(), type });
-        }
-      } else {
-        setStatus(`⚠️ 未註冊：${cleanId}`);
+    const snap = await get(ref(db, `authorized_cards/${cleanId}`));
+    if (snap.exists()) {
+      const user = snap.val();
+      setStatus(`✅ ${user.name} 打卡成功`);
+      if (user.role === 'teacher') {
         await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
+      } else {
+        await push(ref(db, 'student_logs'), { name: user.name, id: cleanId, time: serverTimestamp(), type });
       }
-    } catch (e) {
-      setStatus("連線失敗");
+    } else {
+      setStatus(`⚠️ 未註冊：${cleanId}`);
+      await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
     }
 
     setTimeout(() => {
       setIsDone(false);
-      setStatus("📡 監控中...");
+      setStatus("⌛ 系統待命：請感應卡片");
     }, 3000);
   };
 
-  // 組件卸載時關閉鏡頭，避免資源佔用
-  useEffect(() => {
-    return () => {
-      if (readerRef.current) {
-        readerRef.current.reset();
-      }
-    };
-  }, []);
-
   return (
     <div style={isDone ? successBg : normalBg}>
-      <h1 style={{ fontSize: '1.2rem', marginBottom: '10px' }}>TERRY EDU STATION</h1>
-      
-      <div style={scanWindow}>
-        <video 
-          ref={videoRef} 
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
-        />
-        <div style={redLine}></div>
-        {isDone && <div style={overlay}>✅</div>}
+      <h1>TERRY EDU</h1>
+      <div style={statusCard}>
+        <div style={{ fontSize: '4rem', marginBottom: '10px' }}>{isDone ? "✅" : "🪪"}</div>
+        <p style={{ fontWeight: 'bold' }}>{status}</p>
       </div>
 
-      <p style={statusText}>{status}</p>
-      {!isDone && <button onClick={startSensors} style={btnStyle}>點擊啟動監控</button>}
+      {!isDone && (
+        <div style={{ marginTop: '20px' }}>
+          <button onClick={startNFC} style={nfcBtn}>啟動 NFC 監測</button>
+          
+          {/* 備案：手動輸入 (Vibe 補登) */}
+          <div style={{ marginTop: '30px', borderTop: '1px solid #333', paddingTop: '20px' }}>
+            <input 
+              value={manualId} 
+              onChange={(e) => setManualId(e.target.value)} 
+              placeholder="或輸入卡號/學號"
+              style={inputStyle}
+            />
+            <button onClick={() => handleProcess(manualId, "MANUAL")} style={manualBtn}>補登</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// 樣式設定 (跟之前一樣)
-const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#000', color: '#10b981', textAlign: 'center' };
-const successBg = { ...normalBg, background: '#064e3b', color: '#fff' };
-const scanWindow = { width: '90%', maxWidth: '400px', height: '300px', background: '#222', borderRadius: '20px', position: 'relative', overflow: 'hidden', border: '3px solid #334155' };
-const redLine = { position: 'absolute', top: '50%', left: '5%', width: '90%', height: '2px', background: 'rgba(239, 68, 68, 0.7)', zIndex: 10, boxShadow: '0 0 10px red' };
-const overlay = { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(6, 78, 59, 0.8)', display: 'flex', justifyContent: 'center', alignItems: 'center', fontSize: '5rem', zIndex: 20 };
-const statusText = { fontSize: '1.2rem', margin: '30px', fontWeight: 'bold' };
-const btnStyle = { padding: '15px 40px', background: '#10b981', color: 'white', border: 'none', borderRadius: '50px', fontSize: '1.2rem', fontWeight: 'bold' };
+// 樣式
+const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#000', color: '#fff', textAlign: 'center' };
+const successBg = { ...normalBg, background: '#064e3b' };
+const statusCard = { padding: '30px', borderRadius: '20px', background: '#111', border: '2px solid #333', width: '80%' };
+const nfcBtn = { padding: '15px 30px', background: '#10b981', color: '#fff', border: 'none', borderRadius: '10px', fontWeight: 'bold' };
+const inputStyle = { padding: '10px', borderRadius: '5px', border: '1px solid #444', background: '#222', color: '#fff', width: '150px' };
+const manualBtn = { padding: '10px 20px', marginLeft: '10px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '5px' };
