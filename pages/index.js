@@ -1,88 +1,85 @@
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/router';
 import { db } from '../lib/firebase';
-import { ref, onValue, get, push, set, serverTimestamp } from 'firebase/database';
+import { ref, onValue, get, set } from 'firebase/database';
 
-export default function UnifiedScanStation() {
-  const [status, setStatus] = useState("⌛ 系統待命：請感應或掃描");
+export default function Home() {
+  const router = useRouter();
+  const [status, setStatus] = useState("🔒 系統鎖定中...");
   const [isSuccess, setIsSuccess] = useState(false);
-  const [isClient, setIsClient] = useState(false); // 🚩 確保是瀏覽器環境
+  const MY_GOD_CARD = process.env.NEXT_PUBLIC_MY_GOD_CARD;
 
   useEffect(() => {
-    setIsClient(true);
-    
-    // 1. NFC 監聽 (不受鏡頭影響)
+    // --- 1. 監聽地端 Python (IC 卡 / 接觸式) ---
+    const checkLocalIC = setInterval(async () => {
+      try {
+        const res = await fetch('http://localhost:5000/scan');
+        const data = await res.json();
+        if (data.status === "success") handleAuth(data.id, "IC/ID");
+      } catch (err) {
+        // Python 未啟動時不顯示錯誤，保持靜默
+      }
+    }, 1000);
+
+    // --- 2. 監聽雲端 Firebase (手機傳過來的老師卡) ---
     const scanRef = ref(db, 'system/last_scan');
-    const unsubscribe = onValue(scanRef, (snapshot) => {
+    const unsubscribeFirebase = onValue(scanRef, (snapshot) => {
       const data = snapshot.val();
-      if (data && data.id) handleProcess(data.id, "NFC/ID");
+      if (data && data.id) handleAuth(data.id, "Mobile/NFC");
     });
 
-    // 2. 條碼掃描 (放在動態載入中)
-    let html5QrCode;
-    const startScanner = async () => {
-      try {
-        const { Html5QrcodeScanner } = await import("html5-qrcode");
-        html5QrCode = new Html5QrcodeScanner("reader", { 
-          fps: 10, 
-          qrbox: { width: 250, height: 150 },
-          rememberLastUsedCamera: true
-        });
-        html5QrCode.render(onScanSuccess, onScanError);
-      } catch (err) {
-        console.error("掃描器啟動失敗:", err);
-        setStatus("⚠️ 鏡頭啟動失敗，請使用 NFC 感應");
-      }
-    };
+    // --- 統一驗證與跳轉邏輯 ---
+    async function handleAuth(cardId, source) {
+      if (isSuccess) return;
 
-    if (typeof window !== 'undefined') startScanner();
+      const cleanId = cardId.replace(/[\s:]/g, '').toUpperCase();
+      const godId = MY_GOD_CARD.replace(/[\s:]/g, '').toUpperCase();
+
+      // 判定管理員
+      if (cleanId === godId) {
+        executeLogin("管理員", source);
+        setTimeout(() => router.push('/admin'), 1000);
+        return;
+      }
+
+      // 判定一般授權老師
+      const userSnap = await get(ref(db, `authorized_cards/${cleanId}`));
+      if (userSnap.exists()) {
+        executeLogin(userSnap.val().name, source);
+        setTimeout(() => router.push('/teacher'), 1000);
+      } else {
+        setStatus(`🚫 未授權卡片: ${cardId.substring(0, 10)}...`);
+      }
+    }
+
+    async function executeLogin(name, source) {
+      setIsSuccess(true);
+      setStatus(`✅ ${name} 驗證成功 (${source})`);
+      // 如果是從手機來的，要清空 Firebase 避免重複觸發
+      if (source === "Mobile/NFC") {
+        await set(ref(db, 'system/last_scan'), null);
+      }
+    }
 
     return () => {
-      unsubscribe();
-      if (html5QrCode) html5QrCode.clear();
+      clearInterval(checkLocalIC);
+      unsubscribeFirebase();
     };
-  }, []);
-
-  const onScanSuccess = (decodedText) => handleProcess(decodedText, "BARCODE");
-  const onScanError = (err) => { /* 掃描中正常的尋找條碼錯誤，不處理 */ };
-
-  async function handleProcess(cardId, type) {
-    if (isSuccess) return;
-    const cleanId = cardId.replace(/[\s:]/g, '').toUpperCase();
-    
-    try {
-      const teacherSnap = await get(ref(db, `authorized_cards/${cleanId}`));
-      if (teacherSnap.exists()) {
-        setStatus(`🍎 老師好：${teacherSnap.val().name}`);
-      } else {
-        setStatus(`🎒 學生打卡：${cleanId.substring(0, 8)}`);
-        await push(ref(db, 'student_logs'), { id: cleanId, time: serverTimestamp(), type });
-      }
-      
-      setIsSuccess(true);
-      await set(ref(db, 'system/last_scan'), null);
-      setTimeout(() => {
-        setIsSuccess(false);
-        setStatus("⌛ 系統待命：請感應或掃描");
-      }, 3000);
-    } catch (e) {
-      console.error("處理失敗:", e);
-    }
-  }
-
-  if (!isClient) return null; // 預防伺服器端渲染錯誤
+  }, [router, MY_GOD_CARD, isSuccess]);
 
   return (
-    <div style={isSuccess ? successBg : normalBg}>
-      <h1 style={{ fontSize: '2.5rem' }}>TERRY EDU</h1>
-      
-      {/* 🚩 掃描器容器：確保 ID 叫 reader */}
-      <div id="reader" style={{ width: '100%', maxWidth: '400px', margin: '20px auto', display: isSuccess ? 'none' : 'block' }}></div>
-      
-      <p style={{ fontSize: '1.5rem', fontWeight: 'bold', padding: '20px' }}>{status}</p>
-      <div style={{ opacity: 0.5 }}>[ 支援 ID卡 / IC卡 / 條碼 ]</div>
+    <div style={isSuccess ? successStyle : normalStyle}>
+      <div style={cardStyle}>
+        <h1 style={{ fontSize: '3rem', margin: '0' }}>TERRY EDU</h1>
+        <div style={{ fontSize: '5rem', margin: '20px 0' }}>{isSuccess ? "🔓" : "🛡️"}</div>
+        <p style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{status}</p>
+        <p style={{ opacity: 0.5 }}>[ 請插入 IC 卡或感應學生證 ]</p>
+      </div>
     </div>
   );
 }
 
-const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', background: '#0f172a', color: 'white', textAlign: 'center' };
-const successBg = { ...normalBg, background: '#064e3b' };
+// 樣式設定
+const normalStyle = { height: '100vh', display: 'flex', justifyContent: 'center', alignItems: 'center', background: '#0f172a', color: 'white', fontFamily: 'sans-serif' };
+const successStyle = { ...normalStyle, background: '#064e3b' };
+const cardStyle = { textAlign: 'center', padding: '60px', borderRadius: '40px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 20px 50px rgba(0,0,0,0.3)' };
