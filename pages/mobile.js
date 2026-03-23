@@ -1,15 +1,16 @@
 import { useEffect, useState, useRef } from 'react';
-import Quagga from '@ericblade/quagga2';
+import { BrowserMultiFormatReader } from '@zxing/library'; // 🚩 換成專業 ZXing
 import { db } from '../lib/firebase';
 import { ref, get, set, push, serverTimestamp } from 'firebase/database';
 
 export default function MobileStation() {
   const [status, setStatus] = useState("等待啟動...");
   const [isDone, setIsDone] = useState(false);
-  const scannerRef = useRef(null);
+  const videoRef = useRef(null);
+  const codeReader = new BrowserMultiFormatReader();
 
   const startSensors = async () => {
-    setStatus("🚀 系統啟動中...");
+    setStatus("🚀 專業鏡頭啟動中...");
     
     // 1. 啟動 NFC (Android 專屬)
     if ('NDEFReader' in window) {
@@ -20,34 +21,19 @@ export default function MobileStation() {
       } catch (e) { console.error("NFC Error", e); }
     }
 
-    // 2. 啟動 Quagga (條碼掃描)
-    Quagga.init({
-      inputStream: {
-        type: "LiveStream",
-        constraints: {
-          width: { min: 640 },
-          height: { min: 480 },
-          facingMode: "environment"
-        },
-        target: scannerRef.current, // 🚩 確保掛載到這個 DIV
-        willReadFrequently: true
-      },
-      decoder: { readers: ["code_128_reader", "code_39_reader"] },
-      locate: true
-    }, (err) => {
-      if (err) {
-        setStatus("❌ 鏡頭啟動失敗");
-        return;
-      }
-      Quagga.start();
+    // 2. 啟動 ZXing 條碼掃描
+    try {
+      // 🚩 直接開始掃描並掛載到 videoRef
+      codeReader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
+        if (result) {
+          handleProcess(result.getText(), "BARCODE");
+        }
+      });
       setStatus("📡 監控中：請靠近感應或掃描");
-    });
-
-    Quagga.onDetected((res) => {
-      if (res.codeResult.confidence > 0.6) {
-        handleProcess(res.codeResult.code, "BARCODE");
-      }
-    });
+    } catch (err) {
+      console.error(err);
+      setStatus("❌ 鏡頭啟動失敗");
+    }
   };
 
   const handleProcess = async (cardId, type) => {
@@ -78,21 +64,14 @@ export default function MobileStation() {
 
   return (
     <div style={isDone ? successBg : normalBg}>
-      <h1 style={{ fontSize: '1.2rem', marginBottom: '10px' }}>TERRY EDU STATION</h1>
+      <h1 style={{ fontSize: '1.2rem', marginBottom: '10px' }}>TERRY EDU STATION (ZXing)</h1>
       
-      {/* 🚩 關鍵區域：Quagga 會在這裡面插入 video 標籤 */}
-      <div 
-        ref={scannerRef} 
-        id="interactive" 
-        className="viewport"
-        style={scanWindow}
-      >
-        {/* 增加這行 CSS 確保內建的 video 能被看見 */}
-        <style dangerouslySetInnerHTML={{ __html: `
-          #interactive video { width: 100%; height: 100%; object-fit: cover; position: absolute; top: 0; left: 0; }
-          #interactive canvas.drawingBuffer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
-        `}} />
-        
+      {/* 🚩 這次我們直接放 Video 標籤，保證看得到畫面 */}
+      <div style={scanWindow}>
+        <video 
+          ref={videoRef} 
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+        />
         <div style={redLine}></div>
         {isDone && <div style={overlay}>✅</div>}
       </div>
@@ -103,7 +82,7 @@ export default function MobileStation() {
   );
 }
 
-// 樣式調整
+// 樣式保持專業感
 const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#000', color: '#10b981', textAlign: 'center' };
 const successBg = { ...normalBg, background: '#064e3b', color: '#fff' };
 const scanWindow = { width: '90%', maxWidth: '400px', height: '300px', background: '#222', borderRadius: '20px', position: 'relative', overflow: 'hidden', border: '3px solid #334155' };
