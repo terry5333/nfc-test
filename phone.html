@@ -1,0 +1,13 @@
+// 取得手機感應到的 ID 並推送到 Firebase
+const handleNFCScan = async () => {
+  const ndef = new NDEFReader();
+  await ndef.scan();
+  ndef.onreading = (event) => {
+    const cardId = event.serialNumber;
+    // 將 ID 寫入雲端路徑 /current_scan
+    set(ref(db, 'system/last_scan'), {
+      id: cardId,
+      timestamp: Date.now()
+    });
+  };
+};
