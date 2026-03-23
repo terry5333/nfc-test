@@ -1,79 +1,88 @@
 import { useEffect, useState } from 'react';
-import { Html5QrcodeScanner } from "html5-qrcode";
 import { db } from '../lib/firebase';
-import { ref, get, push, set, serverTimestamp } from 'firebase/database';
+import { ref, onValue, get, push, set, serverTimestamp } from 'firebase/database';
 
 export default function UnifiedScanStation() {
-  const [status, setStatus] = useState("⌛ 系統待命：請感應卡片或掃描條碼");
+  const [status, setStatus] = useState("⌛ 系統待命：請感應或掃描");
   const [isSuccess, setIsSuccess] = useState(false);
+  const [isClient, setIsClient] = useState(false); // 🚩 確保是瀏覽器環境
 
   useEffect(() => {
-    // --- A. 條碼掃描初始化 ---
-    const scanner = new Html5QrcodeScanner("reader", { 
-      fps: 10, 
-      qrbox: { width: 250, height: 150 } // 設定為長方形適合掃描條碼
-    });
-
-    scanner.render((decodedText) => {
-      // 掃到條碼後的動作
-      handleProcess(decodedText, "BARCODE");
-    }, (error) => {
-      // 掃描中的正常錯誤忽略
-    });
-
-    // --- B. 原有的 NFC 監聽邏輯 ---
+    setIsClient(true);
+    
+    // 1. NFC 監聽 (不受鏡頭影響)
     const scanRef = ref(db, 'system/last_scan');
     const unsubscribe = onValue(scanRef, (snapshot) => {
       const data = snapshot.val();
       if (data && data.id) handleProcess(data.id, "NFC/ID");
     });
 
-    // --- C. 統一處理中心 ---
-    async function handleProcess(cardId, type) {
-      if (isSuccess) return; // 防止重複觸發
+    // 2. 條碼掃描 (放在動態載入中)
+    let html5QrCode;
+    const startScanner = async () => {
+      try {
+        const { Html5QrcodeScanner } = await import("html5-qrcode");
+        html5QrCode = new Html5QrcodeScanner("reader", { 
+          fps: 10, 
+          qrbox: { width: 250, height: 150 },
+          rememberLastUsedCamera: true
+        });
+        html5QrCode.render(onScanSuccess, onScanError);
+      } catch (err) {
+        console.error("掃描器啟動失敗:", err);
+        setStatus("⚠️ 鏡頭啟動失敗，請使用 NFC 感應");
+      }
+    };
 
-      const cleanId = cardId.replace(/[\s:]/g, '').toUpperCase();
+    if (typeof window !== 'undefined') startScanner();
+
+    return () => {
+      unsubscribe();
+      if (html5QrCode) html5QrCode.clear();
+    };
+  }, []);
+
+  const onScanSuccess = (decodedText) => handleProcess(decodedText, "BARCODE");
+  const onScanError = (err) => { /* 掃描中正常的尋找條碼錯誤，不處理 */ };
+
+  async function handleProcess(cardId, type) {
+    if (isSuccess) return;
+    const cleanId = cardId.replace(/[\s:]/g, '').toUpperCase();
+    
+    try {
       const teacherSnap = await get(ref(db, `authorized_cards/${cleanId}`));
-      
       if (teacherSnap.exists()) {
         setStatus(`🍎 老師好：${teacherSnap.val().name}`);
       } else {
-        setStatus(`🎒 學生打卡成功：${cleanId}`);
-        await push(ref(db, 'student_logs'), { id: cleanId, time: serverTimestamp(), type: type });
+        setStatus(`🎒 學生打卡：${cleanId.substring(0, 8)}`);
+        await push(ref(db, 'student_logs'), { id: cleanId, time: serverTimestamp(), type });
       }
-
+      
       setIsSuccess(true);
-      await set(ref(db, 'system/last_scan'), null); // 清空 NFC 狀態
-
+      await set(ref(db, 'system/last_scan'), null);
       setTimeout(() => {
         setIsSuccess(false);
-        setStatus("⌛ 系統待命：請感應卡片或掃描條碼");
+        setStatus("⌛ 系統待命：請感應或掃描");
       }, 3000);
+    } catch (e) {
+      console.error("處理失敗:", e);
     }
+  }
 
-    return () => {
-      scanner.clear();
-      unsubscribe();
-    };
-  }, [isSuccess]);
+  if (!isClient) return null; // 預防伺服器端渲染錯誤
 
   return (
     <div style={isSuccess ? successBg : normalBg}>
-      <h1 style={{ fontSize: '2.5rem' }}>{isSuccess ? "PASS" : "TERRY EDU 感應站"}</h1>
+      <h1 style={{ fontSize: '2.5rem' }}>TERRY EDU</h1>
       
-      {/* 條碼掃描顯示區域 */}
-      {!isSuccess && (
-        <div id="reader" style={{ width: '300px', margin: '20px auto', background: 'white', borderRadius: '10px' }}></div>
-      )}
+      {/* 🚩 掃描器容器：確保 ID 叫 reader */}
+      <div id="reader" style={{ width: '100%', maxWidth: '400px', margin: '20px auto', display: isSuccess ? 'none' : 'block' }}></div>
       
-      <p style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{status}</p>
-      
-      <div style={{ marginTop: '20px', fontSize: '0.9rem', opacity: 0.6 }}>
-        支援：身分證條碼 / 學生證條碼 / NFC / IC 卡
-      </div>
+      <p style={{ fontSize: '1.5rem', fontWeight: 'bold', padding: '20px' }}>{status}</p>
+      <div style={{ opacity: 0.5 }}>[ 支援 ID卡 / IC卡 / 條碼 ]</div>
     </div>
   );
 }
 
-const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', background: '#0f172a', color: 'white', transition: '0.5s', textAlign: 'center' };
+const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', background: '#0f172a', color: 'white', textAlign: 'center' };
 const successBg = { ...normalBg, background: '#064e3b' };
