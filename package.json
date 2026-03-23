@@ -1,6 +1,6 @@
 {
-  "name": "terry-edu-nfc-system",
-  "version": "0.1.0",
+  "name": "terry-edu-gate-system",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,10 +9,15 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "firebase": "^10.8.0",
-    "next": "14.1.0",
-    "react": "^18",
-    "react-dom": "^18",
-    "lucide-react": "^0.344.0"
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "firebase": "^10.0.0",
+    "html5-qrcode": "^2.3.8",
+    "lucide-react": "latest"
+  },
+  "devDependencies": {
+    "eslint": "latest",
+    "eslint-config-next": "latest"
   }
 }
