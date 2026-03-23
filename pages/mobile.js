@@ -1,5 +1,4 @@
 import { useEffect, useState, useRef } from 'react';
-import { BrowserMultiFormatReader } from '@zxing/library'; // 🚩 換成專業 ZXing
 import { db } from '../lib/firebase';
 import { ref, get, set, push, serverTimestamp } from 'firebase/database';
 
@@ -7,7 +6,7 @@ export default function MobileStation() {
   const [status, setStatus] = useState("等待啟動...");
   const [isDone, setIsDone] = useState(false);
   const videoRef = useRef(null);
-  const codeReader = new BrowserMultiFormatReader();
+  const readerRef = useRef(null); // 🚩 用來存儲掃描器實例
 
   const startSensors = async () => {
     setStatus("🚀 專業鏡頭啟動中...");
@@ -21,10 +20,12 @@ export default function MobileStation() {
       } catch (e) { console.error("NFC Error", e); }
     }
 
-    // 2. 啟動 ZXing 條碼掃描
+    // 2. 動態載入 ZXing 並啟動
     try {
-      // 🚩 直接開始掃描並掛載到 videoRef
-      codeReader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
+      const { BrowserMultiFormatReader } = await import('@zxing/library');
+      readerRef.current = new BrowserMultiFormatReader();
+      
+      readerRef.current.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
         if (result) {
           handleProcess(result.getText(), "BARCODE");
         }
@@ -36,24 +37,29 @@ export default function MobileStation() {
     }
   };
 
+  // 處理感應邏輯
   const handleProcess = async (cardId, type) => {
     if (isDone) return;
     const cleanId = cardId.replace(/[\s:]/g, '').toUpperCase();
     setIsDone(true);
     if (navigator.vibrate) navigator.vibrate(200);
 
-    const snap = await get(ref(db, `authorized_cards/${cleanId}`));
-    if (snap.exists()) {
-      const user = snap.val();
-      setStatus(`✅ ${user.name} 打卡成功`);
-      if (user.role === 'teacher') {
-        await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
+    try {
+      const snap = await get(ref(db, `authorized_cards/${cleanId}`));
+      if (snap.exists()) {
+        const user = snap.val();
+        setStatus(`✅ ${user.name} 打卡成功`);
+        if (user.role === 'teacher') {
+          await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
+        } else {
+          await push(ref(db, 'student_logs'), { name: user.name, id: cleanId, time: serverTimestamp(), type });
+        }
       } else {
-        await push(ref(db, 'student_logs'), { name: user.name, id: cleanId, time: serverTimestamp(), type });
+        setStatus(`⚠️ 未註冊：${cleanId}`);
+        await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
       }
-    } else {
-      setStatus(`⚠️ 未註冊：${cleanId}`);
-      await set(ref(db, 'system/last_scan'), { id: cleanId, time: Date.now() });
+    } catch (e) {
+      setStatus("連線失敗");
     }
 
     setTimeout(() => {
@@ -62,11 +68,19 @@ export default function MobileStation() {
     }, 3000);
   };
 
+  // 組件卸載時關閉鏡頭，避免資源佔用
+  useEffect(() => {
+    return () => {
+      if (readerRef.current) {
+        readerRef.current.reset();
+      }
+    };
+  }, []);
+
   return (
     <div style={isDone ? successBg : normalBg}>
-      <h1 style={{ fontSize: '1.2rem', marginBottom: '10px' }}>TERRY EDU STATION (ZXing)</h1>
+      <h1 style={{ fontSize: '1.2rem', marginBottom: '10px' }}>TERRY EDU STATION</h1>
       
-      {/* 🚩 這次我們直接放 Video 標籤，保證看得到畫面 */}
       <div style={scanWindow}>
         <video 
           ref={videoRef} 
@@ -82,7 +96,7 @@ export default function MobileStation() {
   );
 }
 
-// 樣式保持專業感
+// 樣式設定 (跟之前一樣)
 const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#000', color: '#10b981', textAlign: 'center' };
 const successBg = { ...normalBg, background: '#064e3b', color: '#fff' };
 const scanWindow = { width: '90%', maxWidth: '400px', height: '300px', background: '#222', borderRadius: '20px', position: 'relative', overflow: 'hidden', border: '3px solid #334155' };
