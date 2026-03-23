@@ -1,72 +1,72 @@
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/router';
 import { db } from '../lib/firebase';
-import { ref, onValue, get, set } from 'firebase/database';
+import { ref, onValue, get, push, set, serverTimestamp } from 'firebase/database';
 
-export default function Home() {
-  const router = useRouter();
-  const [status, setStatus] = useState("🔒 系統鎖定中，請感應 ID 或插入 IC 卡...");
-  const MY_GOD_CARD = process.env.NEXT_PUBLIC_MY_GOD_CARD;
+export default function UnifiedScanStation() {
+  const [status, setStatus] = useState("⌛ 系統待命列隊中...");
+  const [isSuccess, setIsSuccess] = useState(false);
 
   useEffect(() => {
-    // --- 來源 A: 手機感應 (ID/NFC) ---
+    // 監聽感應紀錄 (NFC/ID)
     const scanRef = ref(db, 'system/last_scan');
-    const unsubscribeFirebase = onValue(scanRef, async (snapshot) => {
+    const unsubscribe = onValue(scanRef, async (snapshot) => {
       const data = snapshot.val();
-      if (data && data.id) handleAuth(data.id, "ID/NFC");
+      if (data && data.id) {
+        handleProcess(data.id, "NFC/ID");
+      }
     });
 
-    // --- 來源 B: 地端讀卡機 (IC 卡) ---
-    const checkLocalIC = setInterval(async () => {
-      try {
-        const res = await fetch('http://localhost:5000/scan');
-        const data = await res.json();
-        if (data.status === "success") handleAuth(data.id, "IC 卡");
-      } catch (err) {
-        // Python 沒開時不報錯，靜默等待
-      }
-    }, 1000);
+    // 處理感應流程
+    async function handleProcess(cardId, type) {
+      const cleanId = cardId.replace(/[\s:]/g, '').toUpperCase();
+      
+      // 1. 先查老師名單
+      const teacherSnap = await get(ref(db, `authorized_cards/${cleanId}`));
+      
+      if (teacherSnap.exists()) {
+        const teacher = teacherSnap.val();
+        setStatus(`🍎 老師好：${teacher.name}`);
+        setIsSuccess(true);
+        // 老師卡感應後清空雲端並跳轉 (或是依組長需求停留在這)
+        await set(ref(db, 'system/last_scan'), null);
+        // setTimeout(() => router.push('/admin'), 1500); 
+      } 
+      else {
+        // 2. 不是老師，就視為學生打卡
+        setStatus(`🎒 學生打卡成功：${cardId.substring(0,8)}`);
+        setIsSuccess(true);
+        
+        // 存入學生打卡紀錄
+        await push(ref(db, 'student_logs'), {
+          id: cardId,
+          time: serverTimestamp(),
+          type: type
+        });
 
-    // --- 統一驗證邏輯 ---
-    async function handleAuth(cardId, type) {
-      const cleanId = cardId.replace(/[\s:]/g, ''); // 統一格式：移除空格與冒號
-      const godId = MY_GOD_CARD.replace(/[\s:]/g, '');
-
-      if (cleanId === godId) {
-        setStatus(`✅ 管理員 (${type}) 驗證成功...`);
-        if (type === "ID/NFC") await set(ref(db, 'system/last_scan'), null); // 清空雲端
-        setTimeout(() => router.push('/admin'), 500);
-        return;
+        // 🚩 關鍵：學生打卡完後立刻清空 ID，讓下一位能感應
+        await set(ref(db, 'system/last_scan'), null);
       }
 
-      const userSnap = await get(ref(db, `authorized_cards/${cleanId}`));
-      if (userSnap.exists()) {
-        setStatus(`👋 歡迎 ${userSnap.val().name} 老師 (${type})`);
-        if (type === "ID/NFC") await set(ref(db, 'system/last_scan'), null);
-        setTimeout(() => router.push('/teacher'), 500);
-      } else {
-        setStatus(`🚫 未授權 ${type}: ${cardId.substring(0, 10)}...`);
-      }
+      // 3 秒後恢復待機狀態
+      setTimeout(() => {
+        setIsSuccess(false);
+        setStatus("⌛ 系統待命列隊中...");
+      }, 3000);
     }
 
-    return () => {
-      unsubscribeFirebase();
-      clearInterval(checkLocalIC);
-    };
-  }, [router, MY_GOD_CARD]);
+    return () => unsubscribe();
+  }, []);
 
   return (
-    <div style={pageStyle}>
-      <div style={cardStyle}>
-        <h1>TERRY EDU</h1>
-        <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', fontSize: '3rem' }}>
-          <span>📲</span><span>💳</span>
-        </div>
-        <p style={{ color: '#00d2ff', fontWeight: 'bold', marginTop: '20px' }}>{status}</p>
+    <div style={isSuccess ? successBg : normalBg}>
+      <h1 style={{ fontSize: '4rem' }}>{isSuccess ? "PASS" : "TERRY EDU"}</h1>
+      <p style={{ fontSize: '2rem' }}>{status}</p>
+      <div style={{ marginTop: '50px', fontSize: '1.2rem', opacity: 0.5 }}>
+        支援：學生證 / 悠遊卡 / 健保卡
       </div>
     </div>
   );
 }
 
-const pageStyle = { display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#0f172a', color: 'white', fontFamily: 'sans-serif' };
-const cardStyle = { textAlign: 'center', padding: '50px', borderRadius: '40px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' };
+const normalBg = { height: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', background: '#0f172a', color: 'white', transition: '0.5s' };
+const successBg = { ...normalBg, background: '#064e3b' };
