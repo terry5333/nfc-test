@@ -46,7 +46,7 @@ export default function AdminDashboard() {
     return () => { clearInterval(checkLocal); unsubScan(); unsubStudents(); unsubTeachers(); unsubLogs(); };
   }, []);
 
-  // --- 處理邏輯 (與之前完全相同) ---
+  // --- 處理邏輯 ---
   const handleAddStudent = async () => {
     if (!newStudent.name || !newStudent.classInfo) return alert("請填寫班級與姓名");
     await push(ref(db, 'school_roster'), { ...newStudent, cardId: null });
@@ -70,10 +70,31 @@ export default function AdminDashboard() {
     alert("✅ 老師註冊成功！");
   };
 
+  // --- 匯出禾豐格式 CSV ---
+  const exportToHeFeng = () => {
+    if (logs.length === 0) return alert("目前沒有打卡紀錄可匯出！");
+    let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; 
+    csvContent += "打卡日期,打卡時間,學生姓名,感應卡號,打卡狀態\n";
+    logs.forEach(log => {
+      const d = new Date(log.time);
+      const dateStr = d.toLocaleDateString('zh-TW');
+      const timeStr = d.toLocaleTimeString('zh-TW', { hour12: false });
+      const name = log.name || "未命名";
+      const cardId = log.id || "";
+      csvContent += `${dateStr},${timeStr},${name},${cardId},正常\n`;
+    });
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `禾豐打卡匯出_${new Date().toLocaleDateString('zh-TW').replace(/\//g, '')}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   // --- 昭和風介面渲染 ---
   return (
     <div style={layout}>
-      {/* 匯入復古明體字型 */}
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700&display=swap');`}</style>
       
       <header style={header}>
@@ -127,7 +148,12 @@ export default function AdminDashboard() {
 
         {activeTab === 'attendance' && (
           <div>
-            <h2 style={sectionTitle}>🕰️ 本日出勤帳</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h2 style={sectionTitle}>🕰️ 本日出勤帳</h2>
+              <button onClick={exportToHeFeng} style={exportBtn}>
+                📥 匯出禾豐 CSV
+              </button>
+            </div>
             <table style={table}>
               <thead><tr><th>刻 (時間)</th><th>氏名 (姓名)</th><th>識別番號 (卡號)</th></tr></thead>
               <tbody>
@@ -184,14 +210,17 @@ const input = { padding: '8px 12px', border: '1px solid #3e2723', background: '#
 const actionBtn = { padding: '8px 20px', background: '#5c7a5f', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', fontWeight: 'bold', boxShadow: '2px 2px 0px #3e2723' };
 const cancelBtn = { padding: '8px 15px', background: '#8c3b3a', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723' };
 const confirmBtn = { padding: '8px 15px', background: '#d9b650', color: '#3e2723', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', fontWeight: 'bold' };
+const exportBtn = { padding: '8px 20px', background: '#3b82f6', color: '#fff', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', fontWeight: 'bold', boxShadow: '2px 2px 0px #3e2723' };
 const alertBox = { padding: '20px', background: '#f5e6d3', border: '2px dashed #8c3b3a', marginBottom: '25px', color: '#3e2723' };
 const codeBlock = { background: '#dcd3c6', padding: '2px 8px', border: '1px solid #a89f91', fontFamily: 'monospace' };
 
-// 表格復古樣式
+// 🚩 補齊剛剛漏掉的 table 變數
+const table = { width: '100%', borderCollapse: 'collapse', textAlign: 'left', marginTop: '10px', border: '2px solid #3e2723' };
+
+// 表格細部復古樣式 (維持不變)
 if (typeof document !== 'undefined') {
   const style = document.createElement('style');
   style.innerHTML = `
-    table { width: 100%; border-collapse: collapse; text-align: left; margin-top: 10px; border: 2px solid #3e2723; }
     th, td { border: 1px solid #3e2723; padding: 12px 15px; }
     th { background: #dcd3c6; color: #3e2723; font-weight: bold; letter-spacing: 2px; }
     tr:nth-child(even) { background: #fbf8f1; }
