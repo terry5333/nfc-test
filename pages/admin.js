@@ -3,7 +3,7 @@ import { db } from '../lib/firebase';
 import { ref, onValue, set, remove, push, update } from 'firebase/database';
 
 export default function AdminDashboard() {
-  const [activeTab, setActiveTab] = useState('students'); // students, attendance, teachers, locked
+  const [activeTab, setActiveTab] = useState('students'); 
   const [lastScan, setLastScan] = useState("");
   const [scanMode, setScanMode] = useState("上學");
 
@@ -15,7 +15,7 @@ export default function AdminDashboard() {
   const [newStudent, setNewStudent] = useState({ classInfo: '', seat: '', name: '' });
   const [newTeacherName, setNewTeacherName] = useState("");
   const [bindingTarget, setBindingTarget] = useState(null);
-  const [unlockTarget, setUnlockTarget] = useState(null); // 🚩 新增：正在處刑(解卡)的對象
+  const [unlockTarget, setUnlockTarget] = useState(null);
 
   const [queryDate, setQueryDate] = useState(() => {
     const tzOffset = (new Date()).getTimezoneOffset() * 60000;
@@ -23,7 +23,10 @@ export default function AdminDashboard() {
   });
 
   useEffect(() => {
+    // 1. 監聽門禁總開關
     const unsubMode = onValue(ref(db, 'system/settings/scanMode'), (s) => setScanMode(s.val() || "上學"));
+
+    // 2. 監聽地端 Python (實體讀卡機)
     const checkLocal = setInterval(async () => {
       try {
         const res = await fetch('http://localhost:5000/scan');
@@ -32,28 +35,51 @@ export default function AdminDashboard() {
       } catch (e) {}
     }, 1000);
 
+    // 3. 監聽雲端 NFC
     const unsubScan = onValue(ref(db, 'system/last_scan'), (s) => {
       const data = s.val();
       if (data && data.id) setLastScan(data.id.replace(/[\s:]/g, '').toUpperCase());
     });
     
+    // 4. 資料庫監聽
     const unsubStudents = onValue(ref(db, 'school_roster'), (s) => {
       const data = s.val();
       setStudents(data ? Object.keys(data).map(k => ({ dbId: k, ...data[k] })) : []);
     });
-    
     const unsubCards = onValue(ref(db, 'authorized_cards'), (s) => {
       const data = s.val() || {};
       setAuthCards(data);
       setTeachers(Object.keys(data).map(k => ({ cardId: k, ...data[k] })).filter(item => item.role === 'teacher'));
     });
-    
     const unsubLogs = onValue(ref(db, 'student_logs'), (s) => {
       const data = s.val();
       setLogs(data ? Object.values(data).reverse() : []);
     });
 
-    return () => { clearInterval(checkLocal); unsubMode(); unsubScan(); unsubStudents(); unsubCards(); unsubLogs(); };
+    // 🚩 5. 全域條碼掃描監聽 (支援 Barcode to PC)
+    let barcodeBuffer = "";
+    const handleGlobalKeyDown = (e) => {
+      // ⚠️ 防呆：如果組長正在輸入框打字(姓名/班級)，就不要攔截鍵盤訊號
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+      if (e.key === 'Enter') {
+        if (barcodeBuffer.trim() !== "") {
+          // 收到 Enter 代表條碼發送完畢，寫入 lastScan
+          setLastScan(barcodeBuffer.trim().toUpperCase());
+          barcodeBuffer = ""; // 清空緩衝區
+        }
+      } else if (e.key.length === 1) {
+        // 收集條碼字元
+        barcodeBuffer += e.key;
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+
+    return () => { 
+      clearInterval(checkLocal); unsubMode(); unsubScan(); 
+      unsubStudents(); unsubCards(); unsubLogs(); 
+      window.removeEventListener('keydown', handleGlobalKeyDown); 
+    };
   }, []);
 
   // --- 操作邏輯 ---
@@ -69,8 +95,6 @@ export default function AdminDashboard() {
   };
 
   const startBinding = (student) => { setBindingTarget(student); setUnlockTarget(null); setLastScan(""); };
-  
-  // 🚩 啟動實體解卡程序
   const startUnlock = (student) => { setUnlockTarget(student); setBindingTarget(null); setLastScan(""); };
 
   const confirmBinding = async () => {
@@ -84,20 +108,15 @@ export default function AdminDashboard() {
     alert("✅ 學生綁卡成功！");
   };
 
-  // 🚩 確認實體解卡
   const confirmUnlock = async () => {
     if (!lastScan || !unlockTarget) return;
-    
-    // 嚴格比對：拿來的卡必須是那張被鎖的卡
     if (lastScan !== unlockTarget.cardId) {
       alert(`❌ 警告：這不是 【${unlockTarget.name}】 被封印的那張卡！請拿原卡來解鎖。`);
       setLastScan("");
       return;
     }
-
     await update(ref(db, `authorized_cards/${unlockTarget.cardId}`), { isLocked: false, spamCount: 0 });
-    setUnlockTarget(null);
-    setLastScan("");
+    setUnlockTarget(null); setLastScan("");
     alert("🔓 封印解除！卡片已恢復正常。");
   };
 
@@ -129,7 +148,6 @@ export default function AdminDashboard() {
       return a.seat.padStart(2, '0').localeCompare(b.seat.padStart(2, '0'));
     });
 
-    // 🚩 抓出所有被鎖定(封印)的學生
     const lockedStudents = sortedStudents.filter(s => s.cardId && authCards[s.cardId]?.isLocked);
 
     return { sortedStudents, dailyStatus, lockedStudents };
@@ -166,7 +184,6 @@ export default function AdminDashboard() {
           <button onClick={() => setActiveTab('students')} style={activeTab === 'students' ? activeBtn : btn}>壹。生徒登錄</button>
           <button onClick={() => setActiveTab('attendance')} style={activeTab === 'attendance' ? activeBtn : btn}>貳。出勤日報表</button>
           <button onClick={() => setActiveTab('teachers')} style={activeTab === 'teachers' ? activeBtn : btn}>參。教師名簿</button>
-          {/* 🚩 獨立解卡專區 */}
           <button onClick={() => setActiveTab('locked')} style={activeTab === 'locked' ? activeLockedBtn : lockedBtn}>
             肆。封印解除 {lockedStudents.length > 0 && <span style={badge}>{lockedStudents.length}</span>}
           </button>
@@ -174,7 +191,7 @@ export default function AdminDashboard() {
       </header>
 
       <main style={mainContent}>
-        {/* 生徒名冊 */}
+        {/* 生徒登錄 */}
         {activeTab === 'students' && (
           <div>
             <h2 style={sectionTitle}>🎒 生徒名冊與識別卷發放</h2>
@@ -188,7 +205,8 @@ export default function AdminDashboard() {
             {bindingTarget && (
               <div style={alertBox}>
                 <p style={{margin: 0, fontWeight: 'bold'}}>⚠️ 正在為【 {bindingTarget.name} 】發放識別卷</p>
-                <p style={{margin: '10px 0'}}>請感應... 目前讀取: <code style={codeBlock}>{lastScan || "待機中"}</code></p>
+                <p style={{margin: '10px 0'}}>請感應卡片 (或使用手機 Barcode 掃描)...</p> 
+                <p>目前讀取: <code style={codeBlock}>{lastScan || "待機中"}</code></p>
                 <div>
                   {lastScan && <button onClick={confirmBinding} style={confirmBtn}>確認發放</button>}
                   <button onClick={() => setBindingTarget(null)} style={cancelBtn}>取消</button>
@@ -257,12 +275,12 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* 老師管理 */}
+        {/* 教職員 */}
         {activeTab === 'teachers' && (
           <div>
             <h2 style={sectionTitle}>🍎 教職員特許名簿</h2>
             <div style={formCard}>
-              <p style={{margin: 0, paddingRight: '15px', fontWeight: 'bold'}}>請感應卡片：<code style={codeBlock}>{lastScan || "待機中..."}</code></p>
+              <p style={{margin: 0, paddingRight: '15px', fontWeight: 'bold'}}>請感應卡片 (或掃描條碼)：<code style={codeBlock}>{lastScan || "待機中..."}</code></p>
               <input placeholder="輸入教職員姓名" value={newTeacherName} onChange={e => setNewTeacherName(e.target.value)} style={input} />
               <button onClick={handleAddTeacher} style={actionBtn}>特許發放</button>
             </div>
@@ -280,20 +298,18 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* 🚩 肆。封印解除專區 */}
+        {/* 封印解除 */}
         {activeTab === 'locked' && (
           <div>
             <h2 style={{...sectionTitle, borderLeftColor: '#9b2226', color: '#9b2226'}}>⛔ 謹慎者名簿 (鎖卡區)</h2>
             <p style={{ color: '#5a3d31', fontWeight: 'bold', marginBottom: '20px' }}>
-              ※ 學生必須持原卡片親自至辦公室，進行感應後方可解除封印。
+              ※ 學生必須持原卡片親自至辦公室，進行感應或掃描後方可解除封印。
             </p>
 
             {unlockTarget && (
               <div style={lockedAlertBox}>
                 <h3 style={{margin: '0 0 10px 0', color: '#9b2226'}}>⚖️ 解卡儀式進行中：【 {unlockTarget.name} 】</h3>
-                <p style={{fontSize: '1.2rem', margin: '10px 0'}}>
-                  👉 請犯規學生將卡片放置於感應區... 
-                </p>
+                <p style={{fontSize: '1.2rem', margin: '10px 0'}}>👉 請犯規學生將卡片放置於感應區 (或進行掃描)... </p>
                 <p style={{fontSize: '1.2rem', fontWeight: 'bold', margin: '15px 0'}}>
                   目前感應晶片：<code style={{...codeBlock, fontSize: '1.2rem'}}>{lastScan || "等待感應..."}</code>
                 </p>
@@ -319,9 +335,7 @@ export default function AdminDashboard() {
                       <td>{s.classInfo}</td><td>{s.seat}</td>
                       <td><b style={{color: '#9b2226'}}>{s.name}</b></td>
                       <td><code style={codeBlock}>{s.cardId}</code></td>
-                      <td>
-                        <button onClick={() => startUnlock(s)} style={prepareUnlockBtn}>🔓 準備解卡</button>
-                      </td>
+                      <td><button onClick={() => startUnlock(s)} style={prepareUnlockBtn}>🔓 準備解卡</button></td>
                     </tr>
                   ))
                 )}
@@ -338,38 +352,29 @@ export default function AdminDashboard() {
 const layout = { padding: '40px 20px', minHeight: '100vh', background: '#f4ecd8', fontFamily: '"Noto Serif TC", serif', color: '#3e2723' };
 const header = { maxWidth: '1000px', margin: '0 auto 30px auto', textAlign: 'center', borderBottom: '3px double #3e2723', paddingBottom: '20px' };
 const title = { fontSize: '2.5rem', letterSpacing: '5px', margin: '0 0 20px 0', color: '#5a3d31', fontWeight: 'bold' };
-
 const modeSwitchContainer = { background: '#dcd3c6', padding: '15px', border: '2px solid #3e2723', display: 'inline-block', marginBottom: '25px', boxShadow: '3px 3px 0px #3e2723' };
 const modeBtnMorning = { padding: '10px 20px', background: '#d9b650', color: '#3e2723', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', fontSize: '1.2rem', fontWeight: 'bold', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', transition: '0.1s' };
 const modeBtnEvening = { ...modeBtnMorning, background: '#5c7a5f', color: '#f4ecd8' };
-
 const tabs = { display: 'flex', justifyContent: 'center', gap: '15px' };
 const btn = { padding: '8px 20px', border: '2px solid #3e2723', background: '#eaddc5', color: '#3e2723', fontFamily: '"Noto Serif TC", serif', fontSize: '1.1rem', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723' };
 const activeBtn = { ...btn, background: '#3e2723', color: '#f4ecd8', boxShadow: 'none', transform: 'translate(2px, 2px)' };
-
-// 🚩 鎖卡區特製按鈕樣式
 const lockedBtn = { ...btn, background: '#f8d7da', borderColor: '#9b2226', color: '#9b2226', fontWeight: 'bold' };
 const activeLockedBtn = { ...lockedBtn, background: '#9b2226', color: '#fff', boxShadow: 'none', transform: 'translate(2px, 2px)' };
 const badge = { background: '#ef4444', color: 'white', padding: '2px 8px', borderRadius: '10px', fontSize: '0.9rem', marginLeft: '5px' };
-
 const mainContent = { maxWidth: '1000px', margin: '0 auto', background: '#fffcf5', padding: '30px', border: '2px solid #3e2723', boxShadow: '5px 5px 0px #3e2723' };
 const sectionTitle = { borderLeft: '8px solid #8c3b3a', paddingLeft: '15px', color: '#3e2723', marginTop: '0', marginBottom: '15px' };
 const formCard = { display: 'flex', gap: '10px', padding: '20px', background: '#eaddc5', border: '1px solid #3e2723', marginBottom: '25px', alignItems: 'center' };
 const input = { padding: '8px 12px', border: '1px solid #3e2723', background: '#f4ecd8', fontFamily: '"Noto Serif TC", serif', flex: 1, fontSize: '1rem', outline: 'none' };
 const dateInput = { ...input, flex: 'none', width: '150px', fontWeight: 'bold' };
-
 const actionBtn = { padding: '8px 20px', background: '#5c7a5f', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', fontWeight: 'bold', boxShadow: '2px 2px 0px #3e2723' };
 const cancelBtn = { padding: '8px 15px', background: '#8c3b3a', color: '#f4ecd8', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', marginLeft: '10px' };
 const confirmBtn = { padding: '8px 15px', background: '#d9b650', color: '#3e2723', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', fontWeight: 'bold' };
 const exportBtn = { padding: '8px 20px', background: '#3b82f6', color: '#fff', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', fontWeight: 'bold', boxShadow: '2px 2px 0px #3e2723' };
 const alertBox = { padding: '20px', background: '#f5e6d3', border: '2px dashed #8c3b3a', marginBottom: '25px', color: '#3e2723' };
 const codeBlock = { background: '#dcd3c6', padding: '2px 8px', border: '1px solid #a89f91', fontFamily: 'monospace' };
-
-// 🚩 鎖卡專區特製樣式
 const lockedAlertBox = { padding: '25px', background: '#f8d7da', border: '3px solid #9b2226', marginBottom: '25px', color: '#3e2723', boxShadow: 'inset 0 0 15px rgba(155, 34, 38, 0.2)' };
 const prepareUnlockBtn = { padding: '8px 15px', background: '#d9b650', color: '#3e2723', border: '2px solid #3e2723', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '2px 2px 0px #3e2723', fontWeight: 'bold' };
 const massiveUnlockBtn = { padding: '15px 30px', background: '#2d6a4f', color: '#fff', border: '3px solid #143628', fontFamily: '"Noto Serif TC", serif', cursor: 'pointer', boxShadow: '4px 4px 0px #143628', fontWeight: 'bold', fontSize: '1.2rem', marginRight: '15px', animation: 'pulse 1.5s infinite' };
-
 const table = { width: '100%', borderCollapse: 'collapse', textAlign: 'left', marginTop: '10px', border: '2px solid #3e2723' };
 
 if (typeof document !== 'undefined') {
